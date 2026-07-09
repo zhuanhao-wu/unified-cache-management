@@ -56,7 +56,7 @@ public:
     BufferManager& operator=(const BufferManager&) = delete;
 
     Status Init(std::string name, MemoryType type, std::size_t slot_capacity, std::size_t slot_num,
-                TransProvider* provider = nullptr);
+                TransProvider* provider = nullptr, bool requireToken = true);
 
     Status Allocate(std::size_t size, ScatterGatherEntry& sge);
     Status Free(std::uint32_t slot_index);
@@ -91,6 +91,7 @@ private:
     TransProvider* provider_{nullptr};
     TransProvider::MemHandle memHandle_{nullptr};
     std::uint32_t tokenId_{0};
+    bool requireToken_{true};
 };
 
 }  // namespace UC::ASU

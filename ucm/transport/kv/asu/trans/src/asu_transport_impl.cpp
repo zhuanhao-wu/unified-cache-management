@@ -93,7 +93,7 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
         switch (config_.providerType) {
             case TransProviderType::AICPU:
 #ifdef UCM_ASU_ENABLE_AICPU_PROVIDER
-                transProvider_ = std::make_unique<AICPUTransProvider>();
+                transProvider_ = std::make_unique<AICPUTransProvider>(config_);
                 break;
 #else
                 return Status::Error(
@@ -158,7 +158,7 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
 
     auto status = sendBufferManager_.Init("asu send buffer", MemoryType::HOST_PINNED,
                                           config_.sendBufferSlotSize, config_.sendBufferSlotNum,
-                                          transProvider_.get());
+                                          transProvider_.get(), false);
     if (!status.ok()) { return status; }
 
     status = flagBufferManager_.Init("asu flag buffer", MemoryType::HOST_PINNED,

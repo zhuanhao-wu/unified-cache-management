@@ -114,7 +114,7 @@ BufferManager::~BufferManager()
 }
 
 Status BufferManager::Init(std::string name, MemoryType type, std::size_t slot_capacity,
-                           std::size_t slot_num, TransProvider* provider)
+                           std::size_t slot_num, TransProvider* provider, bool requireToken)
 {
     if (region_) {
         return Status::Error(StatusCode::INVALID_ARGUMENT, name + " already initialized");
@@ -134,6 +134,7 @@ Status BufferManager::Init(std::string name, MemoryType type, std::size_t slot_c
     slot_capacity_ = slot_capacity;
     slot_stride_ = slotStride;
     slot_num_ = slot_num;
+    requireToken_ = requireToken;
 
     std::size_t total = slot_stride_ * slot_num_;
 
@@ -181,6 +182,11 @@ Status BufferManager::RegisterMemory()
 
     auto tokenStatus = provider_->GetMemTokenId(memHandles[0], tokenId_);
     if (!tokenStatus.ok()) {
+        if (!requireToken_) {
+            tokenId_ = 0;
+            memHandle_ = memHandles[0];
+            return Status::OK();
+        }
         std::vector<TransProvider::UnregisterMemoryDesc> unregDescs{
             {nullptr, memHandles[0]}
         };

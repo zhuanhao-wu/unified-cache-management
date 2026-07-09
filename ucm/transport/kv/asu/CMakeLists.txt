@@ -80,6 +80,77 @@ target_link_libraries(asu_transport
 )
 
 if(BUILD_UCM_ASU_PROVIDER_AICPU)
+    if(NOT DEFINED ASU_HCOMM_ROOT)
+        if(DEFINED ENV{ASU_HCOMM_ROOT})
+            set(ASU_HCOMM_ROOT "$ENV{ASU_HCOMM_ROOT}" CACHE PATH "Install prefix of hcomm")
+        elseif(DEFINED ENV{HCOMM_ROOT})
+            set(ASU_HCOMM_ROOT "$ENV{HCOMM_ROOT}" CACHE PATH "Install prefix of hcomm")
+        else()
+            set(ASU_HCOMM_ROOT "${ASCEND_ROOT}" CACHE PATH "Install prefix of hcomm")
+        endif()
+    endif()
+
+    find_path(ASU_HCOMM_INCLUDE_DIR
+        NAMES hcomm/hcomm_res.h hcomm_res.h
+        HINTS
+            ${ASU_HCOMM_ROOT}/include
+            ${ASU_HCOMM_ROOT}/include/hcomm
+            ${ASU_HCOMM_ROOT}/aarch64-linux/include
+            ${ASU_HCOMM_ROOT}/aarch64-linux/include/hcomm
+            ${ASU_HCOMM_ROOT}/arm64-linux/include
+            ${ASU_HCOMM_ROOT}/arm64-linux/include/hcomm
+        NO_DEFAULT_PATH
+    )
+    if(NOT ASU_HCOMM_INCLUDE_DIR)
+        message(FATAL_ERROR "Cannot find hcomm_res.h under ASU_HCOMM_ROOT=${ASU_HCOMM_ROOT}")
+    endif()
+
+    find_library(ASU_HCOMM_LIB
+        NAMES hcomm
+        HINTS
+            ${ASU_HCOMM_ROOT}/lib
+            ${ASU_HCOMM_ROOT}/lib64
+            ${ASU_HCOMM_ROOT}/aarch64-linux/lib
+            ${ASU_HCOMM_ROOT}/aarch64-linux/lib64
+            ${ASU_HCOMM_ROOT}/arm64-linux/lib
+            ${ASU_HCOMM_ROOT}/arm64-linux/lib64
+        NO_DEFAULT_PATH
+    )
+    if(NOT ASU_HCOMM_LIB)
+        message(FATAL_ERROR "Cannot find libhcomm under ASU_HCOMM_ROOT=${ASU_HCOMM_ROOT}")
+    endif()
+
+    if(NOT DEFINED ASU_HIXL_ROOT)
+        if(DEFINED ENV{ASU_HIXL_ROOT})
+            set(ASU_HIXL_ROOT "$ENV{ASU_HIXL_ROOT}" CACHE PATH "Install prefix of hixl")
+        elseif(DEFINED ENV{HIXL_ROOT})
+            set(ASU_HIXL_ROOT "$ENV{HIXL_ROOT}" CACHE PATH "Install prefix of hixl")
+        else()
+            set(ASU_HIXL_ROOT "${ASCEND_ROOT}" CACHE PATH "Install prefix of hixl")
+        endif()
+    endif()
+
+    find_path(ASU_HIXL_INCLUDE_DIR
+        NAMES hixl/hixl.h
+        HINTS
+            ${ASU_HIXL_ROOT}/include
+            ${ASU_HIXL_ROOT}/aarch64-linux/include
+            ${ASU_HIXL_ROOT}/arm64-linux/include
+        NO_DEFAULT_PATH
+    )
+    if(ASU_HIXL_INCLUDE_DIR)
+        target_include_directories(asu_transport PRIVATE ${ASU_HIXL_INCLUDE_DIR})
+        message(STATUS "ASU HIXL include: ${ASU_HIXL_INCLUDE_DIR}")
+    else()
+        message(WARNING
+            "Cannot find hixl/hixl.h under ASU_HIXL_ROOT=${ASU_HIXL_ROOT}; "
+            "AICPU provider will use its local mirrored HixlBatchSend launch ABI")
+    endif()
+
+    message(STATUS "ASU HCOMM include: ${ASU_HCOMM_INCLUDE_DIR}")
+    message(STATUS "ASU HCOMM lib: ${ASU_HCOMM_LIB}")
+    target_include_directories(asu_transport PRIVATE ${ASU_HCOMM_INCLUDE_DIR})
+    target_link_libraries(asu_transport PRIVATE ${ASU_HCOMM_LIB} ${CMAKE_DL_LIBS})
     target_compile_definitions(asu_transport PRIVATE UCM_ASU_ENABLE_AICPU_PROVIDER=1)
 endif()
 
