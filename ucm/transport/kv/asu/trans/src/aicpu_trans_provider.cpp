@@ -41,7 +41,7 @@ constexpr std::uint32_t kAclSyncGraceMs = 5000U;
 constexpr std::uint32_t kCpuKernelMode = 0U;
 constexpr std::uint32_t kKernelBlockDim = 1U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
-constexpr const char* kProviderSignature = "UCM_ASU_AICPU_STAGED_URMA_EID_ACL_DEVICE_V2";
+constexpr const char* kProviderSignature = "UCM_ASU_AICPU_STAGED_URMA_EID_ACL_DEVICE_MR_V3";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
 constexpr const char* kDefaultAscendHome = "/usr/local/Ascend/cann";
 constexpr const char* kHixlKernelJsonSuffix =
@@ -1274,24 +1274,37 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
         }
 
         std::vector<ConnectionRecord*> connections;
+        bool hasStagedConnection = false;
         {
             std::lock_guard<std::mutex> lock(impl_->mu);
             connections.assign(impl_->connections.begin(), impl_->connections.end());
+            for (auto* conn : connections) {
+                if (conn != nullptr && conn->staged) {
+                    hasStagedConnection = true;
+                    break;
+                }
+            }
         }
-        for (auto* conn : connections) {
-            if (conn == nullptr || conn->channel == 0) { continue; }
-            HcommMemHandle memHandle = record->mem;
-            UC_DEBUG("AICPUTransProvider: HcommChannelUpdateMemInfo begin tag={} channel={}",
-                     record->tag, conn->channel);
-            const auto updateRet = HcommChannelUpdateMemInfo(&memHandle, 1U, conn->channel);
-            if (updateRet != 0) {
-                (void)HcommMemUnreg(record->endpoint, record->mem);
-                delete record;
-                std::vector<UnregisterMemoryDesc> cleanup;
-                cleanup.reserve(created.size());
-                for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
-                if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
-                return HcommConnectionError("HcommChannelUpdateMemInfo", updateRet);
+        if (hasStagedConnection) {
+            UC_INFO("AICPUTransProvider: skipping HcommChannelUpdateMemInfo for staged memory "
+                    "tag={} staged_mr_id={} channels={}",
+                    record->tag, record->stagedMrId, connections.size());
+        } else {
+            for (auto* conn : connections) {
+                if (conn == nullptr || conn->channel == 0) { continue; }
+                HcommMemHandle memHandle = record->mem;
+                UC_DEBUG("AICPUTransProvider: HcommChannelUpdateMemInfo begin tag={} channel={}",
+                         record->tag, conn->channel);
+                const auto updateRet = HcommChannelUpdateMemInfo(&memHandle, 1U, conn->channel);
+                if (updateRet != 0) {
+                    (void)HcommMemUnreg(record->endpoint, record->mem);
+                    delete record;
+                    std::vector<UnregisterMemoryDesc> cleanup;
+                    cleanup.reserve(created.size());
+                    for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
+                    if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+                    return HcommConnectionError("HcommChannelUpdateMemInfo", updateRet);
+                }
             }
         }
 
