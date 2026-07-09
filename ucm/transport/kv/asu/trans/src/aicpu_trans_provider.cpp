@@ -1285,14 +1285,25 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
                 }
             }
         }
-        if (hasStagedConnection) {
-            UC_INFO("AICPUTransProvider: skipping HcommChannelUpdateMemInfo for staged memory "
-                    "tag={} staged_mr_id={} channels={}",
-                    record->tag, record->stagedMrId, connections.size());
-        } else {
-            for (auto* conn : connections) {
-                if (conn == nullptr || conn->channel == 0) { continue; }
-                HcommMemHandle memHandle = record->mem;
+        for (auto* conn : connections) {
+            if (conn == nullptr || conn->channel == 0) { continue; }
+            HcommMemHandle memHandle = record->mem;
+            if (conn->staged) {
+                UC_INFO("AICPUTransProvider: HcommChannelUpdateStagedLocalMemInfo begin "
+                        "tag={} staged_mr_id={} channel={}",
+                        record->tag, record->stagedMrId, conn->channel);
+                const auto updateRet =
+                    HcommChannelUpdateStagedLocalMemInfo(&memHandle, 1U, conn->channel);
+                if (updateRet != 0) {
+                    (void)HcommMemUnreg(record->endpoint, record->mem);
+                    delete record;
+                    std::vector<UnregisterMemoryDesc> cleanup;
+                    cleanup.reserve(created.size());
+                    for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
+                    if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+                    return HcommConnectionError("HcommChannelUpdateStagedLocalMemInfo", updateRet);
+                }
+            } else if (!hasStagedConnection) {
                 UC_DEBUG("AICPUTransProvider: HcommChannelUpdateMemInfo begin tag={} channel={}",
                          record->tag, conn->channel);
                 const auto updateRet = HcommChannelUpdateMemInfo(&memHandle, 1U, conn->channel);
