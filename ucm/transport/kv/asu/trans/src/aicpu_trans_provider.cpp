@@ -41,7 +41,7 @@ constexpr std::uint32_t kAclSyncGraceMs = 5000U;
 constexpr std::uint32_t kCpuKernelMode = 0U;
 constexpr std::uint32_t kKernelBlockDim = 1U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
-constexpr const char* kProviderSignature = "UCM_ASU_AICPU_STAGED_URMA_EID_V1";
+constexpr const char* kProviderSignature = "UCM_ASU_AICPU_STAGED_URMA_EID_ACL_DEVICE_V2";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
 constexpr const char* kDefaultAscendHome = "/usr/local/Ascend/cann";
 constexpr const char* kHixlKernelJsonSuffix =
@@ -477,6 +477,13 @@ struct AICPUTransProvider::Impl {
 
     ~Impl()
     {
+        if (hixlBin != nullptr || stream != nullptr || endpoint != nullptr) {
+            const auto deviceStatus = EnsureAclDeviceBound("AICPUTransProvider cleanup");
+            if (!deviceStatus.ok()) {
+                UC_WARN("AICPUTransProvider: cleanup continuing after device bind failure: {}",
+                        deviceStatus.message);
+            }
+        }
         if (hixlBin != nullptr) {
             (void)aclrtBinaryUnLoad(hixlBin);
             hixlBin = nullptr;
@@ -553,6 +560,51 @@ struct AICPUTransProvider::Impl {
         UC_INFO("AICPUTransProvider: HCOMM endpoint created local_addr={} local_device_id={} "
                 "protocol={}",
                 endpointIp, localDeviceId, CommProtocolName(endpointProtocol));
+        return Status::OK();
+    }
+
+    // HCOMM resolves UB runtime resources through the current thread's ACL device.
+    Status EnsureAclDeviceBound(const char* stage)
+    {
+        if (localDeviceId > static_cast<std::uint32_t>(std::numeric_limits<std::int32_t>::max())) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "AICPUTransProvider: invalid local device id " +
+                                     std::to_string(localDeviceId));
+        }
+
+        const auto deviceId = static_cast<std::int32_t>(localDeviceId);
+        thread_local std::int32_t readyDeviceId = -1;
+
+        std::int32_t currentDevice = -1;
+        if (readyDeviceId == deviceId) {
+            const auto getRet = aclrtGetDevice(&currentDevice);
+            if (getRet == ACL_SUCCESS && currentDevice == deviceId) { return Status::OK(); }
+        }
+
+        const auto initRet = aclInit(nullptr);
+        if (initRet != ACL_SUCCESS && initRet != ACL_ERROR_REPEAT_INITIALIZE) {
+            return AclError(std::string("aclInit before ") + stage, initRet);
+        }
+
+        currentDevice = -1;
+        const auto getRet = aclrtGetDevice(&currentDevice);
+        if (getRet == ACL_SUCCESS && currentDevice == deviceId) {
+            readyDeviceId = deviceId;
+            return Status::OK();
+        }
+
+        const auto setRet = aclrtSetDevice(deviceId);
+        if (setRet != ACL_SUCCESS) {
+            return AclError(std::string("aclrtSetDevice before ") + stage +
+                                " device_id=" + std::to_string(deviceId),
+                            setRet);
+        }
+
+        UC_INFO("AICPUTransProvider: aclrtSetDevice bound device_id={} stage={} "
+                "previous_device={} aclrtGetDevice_ret={} aclInit_ret={}",
+                deviceId, stage, currentDevice, static_cast<int>(getRet),
+                static_cast<int>(initRet));
+        readyDeviceId = deviceId;
         return Status::OK();
     }
 
@@ -844,6 +896,9 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     connectionHandles.clear();
     if (qpNum == 0) { return Status::OK(); }
 
+    auto status = impl_->EnsureAclDeviceBound("CreateConnection");
+    if (!status.ok()) { return status; }
+
     const auto* endpoint = impl_->FindEndpoint(remoteIp, port);
     const auto protocol = ResolveProtocol(impl_->config, endpoint);
     const auto remoteDeviceId = ResolveRemoteDeviceId(endpoint, impl_->localDeviceId);
@@ -854,7 +909,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
             remoteDeviceId, CommProtocolName(protocol), endpoint == nullptr ? 0 : 1);
 
     EndpointDesc remoteDesc{};
-    auto status = BuildEndpointDesc(impl_->config, endpoint, remoteIp, remoteDeviceId, protocol, remoteDesc);
+    status = BuildEndpointDesc(impl_->config, endpoint, remoteIp, remoteDeviceId, protocol, remoteDesc);
     if (!status.ok()) {
         UC_ERROR("AICPUTransProvider: remote EndpointDesc build failed remote_addr={} "
                  "remote_port={} remote_device_id={} protocol={} message={}",
@@ -1040,6 +1095,12 @@ std::vector<Status> AICPUTransProvider::DeleteConnections(
     const std::vector<ConnectionHandle>& connectionHandles)
 {
     std::vector<Status> results(connectionHandles.size(), Status::OK());
+    if (!connectionHandles.empty()) {
+        const auto deviceStatus = impl_->EnsureAclDeviceBound("DeleteConnections");
+        if (!deviceStatus.ok()) {
+            return std::vector<Status>(connectionHandles.size(), deviceStatus);
+        }
+    }
     for (std::size_t index = 0; index < connectionHandles.size(); ++index) {
         auto* record = ToConnectionRecord(connectionHandles[index]);
         {
@@ -1108,6 +1169,9 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
         return hook(ioBatches, kernelCount, quietCount);
     }
 
+    const auto deviceStatus = impl_->EnsureAclDeviceBound("Send");
+    if (!deviceStatus.ok()) { return std::vector<Status>(ioBatches.size(), deviceStatus); }
+
     std::vector<std::uint32_t> hixlStatuses;
     Status launchStatus = Status::OK();
     {
@@ -1132,6 +1196,9 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
 {
     memoryHandles.clear();
     if (memoryDescs.empty()) { return Status::OK(); }
+
+    auto bindStatus = impl_->EnsureAclDeviceBound("RegisterMemory");
+    if (!bindStatus.ok()) { return bindStatus; }
 
     EndpointHandle endpoint = nullptr;
     {
@@ -1259,6 +1326,10 @@ std::vector<Status> AICPUTransProvider::UnregisterMemory(
     const std::vector<UnregisterMemoryDesc>& memoryDescs)
 {
     std::vector<Status> results(memoryDescs.size(), Status::OK());
+    if (!memoryDescs.empty()) {
+        const auto deviceStatus = impl_->EnsureAclDeviceBound("UnregisterMemory");
+        if (!deviceStatus.ok()) { return std::vector<Status>(memoryDescs.size(), deviceStatus); }
+    }
     for (std::size_t index = 0; index < memoryDescs.size(); ++index) {
         auto* record = ToMemoryRecord(memoryDescs[index].memoryHandle);
         {
