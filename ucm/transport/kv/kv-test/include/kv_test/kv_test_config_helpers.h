@@ -6,6 +6,8 @@ namespace UC::KVTest {
 
 bool HasFakeProvider(const KvTestConfig& config);
 bool IsAivProviderMode(const KvTestConfig& config);
+bool IsAicpuProviderMode(const KvTestConfig& config);
+bool UsesDevicePayloadBuffers(const KvTestConfig& config);
 DeviceAllocationPolicy AllocationPolicyForConfig(const KvTestConfig& config);
 void MaybePrepareFakeBackend(KvTestConfig& config);
 

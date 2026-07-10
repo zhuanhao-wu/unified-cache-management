@@ -55,10 +55,21 @@ bool IsAivProviderMode(const KvTestConfig& config)
     return HasProvider(config, UC::ASU::TransProviderType::AIV);
 }
 
+bool IsAicpuProviderMode(const KvTestConfig& config)
+{
+    return HasProvider(config, UC::ASU::TransProviderType::AICPU);
+}
+
+bool UsesDevicePayloadBuffers(const KvTestConfig& config)
+{
+    return HasFakeProvider(config) || IsAivProviderMode(config) || IsAicpuProviderMode(config);
+}
+
 DeviceAllocationPolicy AllocationPolicyForConfig(const KvTestConfig& config)
 {
-    return IsAivProviderMode(config) ? DeviceAllocationPolicy::AIV_REGISTERABLE
-                                     : DeviceAllocationPolicy::DEFAULT;
+    return IsAivProviderMode(config) || IsAicpuProviderMode(config)
+               ? DeviceAllocationPolicy::AIV_REGISTERABLE
+               : DeviceAllocationPolicy::DEFAULT;
 }
 
 void MaybePrepareFakeBackend(KvTestConfig& config)

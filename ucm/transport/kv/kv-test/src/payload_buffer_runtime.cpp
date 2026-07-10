@@ -36,13 +36,23 @@ std::int32_t ResolveFakeBackendPayloadDeviceId(const KvTestConfig& config)
 
 std::int32_t ResolvePayloadDeviceId(const KvTestConfig& config)
 {
-    if (HasFakeProvider(config) && !IsAivProviderMode(config)) {
+    if (HasFakeProvider(config) && !IsAivProviderMode(config) && !IsAicpuProviderMode(config)) {
         return ResolveFakeBackendPayloadDeviceId(config);
     }
 
     if (const char* deviceId = std::getenv("UMC_ASU_DEVICE_ID");
         deviceId != nullptr && *deviceId != '\0') {
         return static_cast<std::int32_t>(std::stol(deviceId));
+    }
+
+    for (const auto& transportConfig : config.asuClientConfig.transportConfigs) {
+        if (transportConfig.providerType != UC::ASU::TransProviderType::AIV &&
+            transportConfig.providerType != UC::ASU::TransProviderType::AICPU) {
+            continue;
+        }
+        for (const auto& endpoint : transportConfig.endpoints) {
+            if (endpoint.deviceId >= 0) { return endpoint.deviceId; }
+        }
     }
 
     for (const auto& transportConfig : config.asuClientConfig.transportConfigs) {
@@ -105,11 +115,6 @@ void PayloadBufferAclRuntime::TearDown()
         (void)aclFinalize();
         initialized_ = false;
     }
-}
-
-bool UsesDevicePayloadBuffers(const KvTestConfig& config)
-{
-    return HasFakeProvider(config) || IsAivProviderMode(config);
 }
 
 Status MaybeSetUpPayloadAclThread(const KvTestConfig& config)

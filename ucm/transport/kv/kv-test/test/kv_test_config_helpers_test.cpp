@@ -20,6 +20,20 @@ TEST(KvTestConfigHelpersTest, AivProviderDoesNotEnableFakeBackend)
     EXPECT_EQ(AllocationPolicyForConfig(config), DeviceAllocationPolicy::AIV_REGISTERABLE);
 }
 
+TEST(KvTestConfigHelpersTest, AicpuProviderUsesRegisterableDevicePayloads)
+{
+    KvTestConfig config;
+    UC::ASU::TransportConfig transportConfig;
+    transportConfig.providerType = UC::ASU::TransProviderType::AICPU;
+    config.asuClientConfig.transportConfigs.emplace_back(std::move(transportConfig));
+
+    EXPECT_FALSE(HasFakeProvider(config));
+    EXPECT_FALSE(IsAivProviderMode(config));
+    EXPECT_TRUE(IsAicpuProviderMode(config));
+    EXPECT_TRUE(UsesDevicePayloadBuffers(config));
+    EXPECT_EQ(AllocationPolicyForConfig(config), DeviceAllocationPolicy::AIV_REGISTERABLE);
+}
+
 TEST(KvTestConfigHelpersTest, FakeDefaultsDoNotModifyAivTransport)
 {
     KvTestConfig config;
@@ -55,6 +69,18 @@ TEST(KvTestConfigHelpersTest, FakeProviderUsesDefaultDeviceAllocation)
     transportConfig.providerType = UC::ASU::TransProviderType::FAKE;
     config.asuClientConfig.transportConfigs.emplace_back(std::move(transportConfig));
 
+    EXPECT_TRUE(UsesDevicePayloadBuffers(config));
+    EXPECT_EQ(AllocationPolicyForConfig(config), DeviceAllocationPolicy::DEFAULT);
+}
+
+TEST(KvTestConfigHelpersTest, UnsupportedProviderKeepsHostPayloads)
+{
+    KvTestConfig config;
+    UC::ASU::TransportConfig transportConfig;
+    transportConfig.providerType = UC::ASU::TransProviderType::UNSUPPORTED;
+    config.asuClientConfig.transportConfigs.emplace_back(std::move(transportConfig));
+
+    EXPECT_FALSE(UsesDevicePayloadBuffers(config));
     EXPECT_EQ(AllocationPolicyForConfig(config), DeviceAllocationPolicy::DEFAULT);
 }
 

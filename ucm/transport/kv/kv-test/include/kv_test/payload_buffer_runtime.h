@@ -20,7 +20,6 @@ private:
 };
 
 std::int32_t ResolvePayloadDeviceId(const KvTestConfig& config);
-bool UsesDevicePayloadBuffers(const KvTestConfig& config);
 Status MaybeSetUpPayloadAclThread(const KvTestConfig& config);
 
 }  // namespace UC::KVTest
