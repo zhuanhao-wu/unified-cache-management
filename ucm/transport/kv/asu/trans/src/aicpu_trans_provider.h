@@ -42,6 +42,8 @@ public:
 
     Status GetMemTokenId(MemHandle memHandle, uint32_t& tokenId) override;
 
+    Status GetMemTransportAddr(MemHandle memHandle, std::uintptr_t& transportAddr) const;
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

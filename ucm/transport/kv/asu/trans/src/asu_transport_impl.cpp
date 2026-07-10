@@ -25,6 +25,7 @@
 #include <acl/acl.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <memory>
@@ -215,6 +216,7 @@ Status AsuTransportImpl::Shutdown()
         }
         registeredRegions_.clear();
         registeredRegionStates_.clear();
+        registeredRegionTransportAddrs_.clear();
         registeredRegionConnectionLeases_.clear();
     }
     if (connManager_) {
@@ -352,7 +354,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
                                  : TransProvider::MemType::MEM_HOST;
         std::vector<TransProvider::RegisterMemoryDesc> descs{
             {memType, static_cast<std::uintptr_t>(region.addr),
-             static_cast<std::size_t>(region.size)}
+             static_cast<std::size_t>(region.size), static_cast<std::uintptr_t>(region.addr)}
         };
         std::vector<TransProvider::MemHandle> memHandles;
         auto connectionChannel =
@@ -385,6 +387,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
         uint32_t tokenId{0};
         status = transProvider_->GetMemTokenId(memHandles[0], tokenId);
         if (!status.ok()) {
+            hasFailure = true;
             (void)transProvider_->UnregisterMemory({
                 TransProvider::UnregisterMemoryDesc{connectionHandle, memHandles[0]}
             });
@@ -392,12 +395,33 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
             continue;
         }
 
+        std::uintptr_t transportAddr = static_cast<std::uintptr_t>(region.addr);
+#ifdef UCM_ASU_ENABLE_AICPU_PROVIDER
+        if (auto* aicpuProvider = dynamic_cast<AICPUTransProvider*>(transProvider_.get());
+            aicpuProvider != nullptr) {
+            status = aicpuProvider->GetMemTransportAddr(memHandles[0], transportAddr);
+            if (!status.ok()) {
+                hasFailure = true;
+                (void)transProvider_->UnregisterMemory({
+                    TransProvider::UnregisterMemoryDesc{connectionHandle, memHandles[0]}
+                });
+                results.emplace_back(RegisterResult{status, kInvalidMRHandle});
+                continue;
+            }
+        }
+#endif
+
         RegisteredMemory regMem;
         regMem.region = region;
         regMem.handle = handle;
         regMem.tokenId = tokenId;  // Only UB is supported for the current version.
         registeredRegions_[handle] = regMem;
         registeredRegionStates_[handle] = RegisteredRegionState{connectionHandle, memHandles[0]};
+        registeredRegionTransportAddrs_[handle] = transportAddr;
+        UC_INFO("AsuTransportImpl: registered region handle={} original_addr={} transport_addr={} "
+                "size={} memory_type={} token_id={}",
+                handle, region.addr, transportAddr, region.size,
+                static_cast<int>(region.memoryType), tokenId);
         if (connectionChannel != nullptr) {
             registeredRegionConnectionLeases_[handle] = std::move(connectionChannel);
         }
@@ -411,6 +435,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
         for (auto handle : registeredHandles) {
             registeredRegions_.erase(handle);
             registeredRegionStates_.erase(handle);
+            registeredRegionTransportAddrs_.erase(handle);
             registeredRegionConnectionLeases_.erase(handle);
         }
         return Status::Error(StatusCode::PARTIAL_FAILED,
@@ -428,6 +453,7 @@ Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemor
     std::lock_guard<std::mutex> lock(registeredRegionsMu_);
     for (const auto& region : regions) {
         registeredRegions_[region.handle] = region;
+        registeredRegionTransportAddrs_.erase(region.handle);
         results.emplace_back(
             RegisterResult{Status::OK(), region.handle, region.lkey, region.rkey, region.tokenId});
     }
@@ -456,6 +482,7 @@ Status AsuTransportImpl::UnregisterRegions(const std::vector<MRHandle>& handles)
 
     for (auto handle : handles) { registeredRegions_.erase(handle); }
     for (auto handle : handles) { registeredRegionStates_.erase(handle); }
+    for (auto handle : handles) { registeredRegionTransportAddrs_.erase(handle); }
     for (auto handle : handles) { registeredRegionConnectionLeases_.erase(handle); }
     return Status::OK();
 }
@@ -624,6 +651,7 @@ void AsuTransportImpl::PollTaskCompletions(const TransportTaskContextPtr& ctx)
             continue;
         }
         if (completedCid == 0 || completedCid != subBatchContext.cid) { continue; }
+        std::atomic_thread_fence(std::memory_order_acquire);
 
         if (subBatchContext.flagBuffer.memory_type == MemoryType::ASCEND_DEVICE) {
             // The header matched; copy the full CQE before unpacking entry status.

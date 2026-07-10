@@ -24,10 +24,12 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 #include "logger.h"
+#include "trans/buffer.h"
 
 namespace UC::ASU {
 namespace {
@@ -40,8 +42,10 @@ constexpr std::uint32_t kDefaultSendTimeoutMs = 1836U * 1000U;
 constexpr std::uint32_t kAclSyncGraceMs = 5000U;
 constexpr std::uint32_t kCpuKernelMode = 0U;
 constexpr std::uint32_t kKernelBlockDim = 1U;
+constexpr std::uintptr_t kHostRegisterAlignment = 4096U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
-constexpr const char* kProviderSignature = "UCM_ASU_AICPU_STAGED_URMA_EID_ACL_DEVICE_MR_V3";
+constexpr const char* kProviderSignature =
+    "UCM_ASU_AICPU_STAGED_URMA_HOST_MAPPED_PAYLOAD_MR_V4";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
 constexpr const char* kDefaultAscendHome = "/usr/local/Ascend/cann";
 constexpr const char* kHixlKernelJsonSuffix =
@@ -79,6 +83,13 @@ struct MemoryRecord {
     HcommMemHandle mem{nullptr};
     EndpointHandle endpoint{nullptr};
     std::string tag;
+    std::uintptr_t originalAddr{0};
+    std::uintptr_t localAddr{0};
+    std::uintptr_t transportAddr{0};
+    std::size_t size{0};
+    TransProvider::MemType memoryType{TransProvider::MemType::MEM_HOST};
+    bool ownsHostMapping{false};
+    std::uintptr_t hostMappingBase{0};
     std::uint32_t tokenId{0};
     bool hasToken{false};
     std::uint32_t stagedMrId{0};
@@ -184,6 +195,12 @@ const char* CommProtocolName(CommProtocol protocol)
         case COMM_PROTOCOL_UBC_CTP: return "ubc_ctp";
         default: return "unknown";
     }
+}
+
+bool IsUbProtocol(CommProtocol protocol)
+{
+    return protocol == COMM_PROTOCOL_UBC_TP || protocol == COMM_PROTOCOL_UB_MEM ||
+           protocol == COMM_PROTOCOL_UBOE || protocol == COMM_PROTOCOL_UBC_CTP;
 }
 
 const char* CommAddrTypeName(CommAddrType type)
@@ -438,6 +455,12 @@ MemoryRecord* ToMemoryRecord(TransProvider::MemHandle handle)
 }  // namespace
 
 struct AICPUTransProvider::Impl {
+    struct HostMapping {
+        std::size_t size{0};
+        std::uintptr_t deviceAddr{0};
+        std::size_t refCount{0};
+    };
+
     explicit Impl(const TransportConfig& configIn)
         : config(configIn),
           localDeviceId(ResolveDeviceId(configIn)),
@@ -650,9 +673,10 @@ struct AICPUTransProvider::Impl {
         for (std::size_t index = 0; index < clientIds.size(); ++index) {
             const auto clientId = clientIds[index];
             const auto requestId = record.stagedMrId + 1U + static_cast<std::uint32_t>(index);
-            UC_INFO("AICPUTransProvider: publishing staged MR tag={} mr_id={} oob={}:{} "
-                    "client_id={} request_id={}",
-                    record.tag, record.stagedMrId, oobHost, oobPort, clientId, requestId);
+            UC_INFO("AICPUTransProvider: publishing staged MR tag={} mr_id={} original_addr={} "
+                    "transport_addr={} size={} oob={}:{} client_id={} request_id={}",
+                    record.tag, record.stagedMrId, record.originalAddr, record.transportAddr,
+                    record.size, oobHost, oobPort, clientId, requestId);
 
             HcommStagedMrPublishDesc publish{};
             const auto initRet = HcommStagedMrPublishDescInit(&publish, 1U);
@@ -670,11 +694,96 @@ struct AICPUTransProvider::Impl {
             if (ret != 0) { return HcommConnectionError("HcommMemPublishStaged", ret); }
         }
         record.stagedPublished = true;
-        UC_INFO("AICPUTransProvider: staged MR published tag={} mr_id={} token_id={} "
-                "has_token={} client_count={}",
-                record.tag, record.stagedMrId, record.tokenId, record.hasToken ? 1 : 0,
-                clientIds.size());
+        UC_INFO("AICPUTransProvider: staged MR published tag={} mr_id={} original_addr={} "
+                "transport_addr={} size={} token_id={} has_token={} client_count={}",
+                record.tag, record.stagedMrId, record.originalAddr, record.transportAddr,
+                record.size, record.tokenId, record.hasToken ? 1 : 0, clientIds.size());
         return Status::OK();
+    }
+
+    Status AcquireHostMapping(std::uintptr_t hostAddr, std::size_t size,
+                              std::uintptr_t& mappingBase, std::uintptr_t& deviceAddr)
+    {
+        mappingBase = hostAddr & ~(kHostRegisterAlignment - 1U);
+        const auto offset = hostAddr - mappingBase;
+        if (size > std::numeric_limits<std::size_t>::max() - offset) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "AICPUTransProvider: aligned host mapping size overflows");
+        }
+        const auto mappingSize = size + static_cast<std::size_t>(offset);
+
+        std::lock_guard<std::mutex> lock(hostMappingMu);
+        auto iter = hostMappings.find(mappingBase);
+        if (iter != hostMappings.end()) {
+            if (iter->second.size < mappingSize) {
+                return Status::Error(
+                    StatusCode::BUFFER_NOT_SUPPORTED,
+                    "AICPUTransProvider: host mapping overlaps a smaller active mapping");
+            }
+            ++iter->second.refCount;
+            deviceAddr = iter->second.deviceAddr + offset;
+            UC_INFO("AICPUTransProvider: reused host mapping host_addr={} mapping_base={} "
+                    "device_addr={} mapping_size={} request_size={} ref_count={}",
+                    hostAddr, mappingBase, deviceAddr, iter->second.size, size,
+                    iter->second.refCount);
+            return Status::OK();
+        }
+
+        void* mapped = nullptr;
+        const auto mapStatus = UC::Trans::Buffer::RegisterHostBuffer(
+            reinterpret_cast<void*>(mappingBase), mappingSize, &mapped);
+        if (mapStatus.Failure() || mapped == nullptr) {
+            return Status::Error(StatusCode::BUFFER_NOT_SUPPORTED,
+                                 "AICPUTransProvider: host mapping failed status=" +
+                                     mapStatus.ToString());
+        }
+
+        const auto mappedBase = reinterpret_cast<std::uintptr_t>(mapped);
+        deviceAddr = mappedBase + offset;
+        hostMappings.emplace(mappingBase, HostMapping{mappingSize, mappedBase, 1});
+        UC_INFO("AICPUTransProvider: created host mapping host_addr={} mapping_base={} "
+                "mapped_base={} device_addr={} mapping_size={} request_size={} device_id={}",
+                hostAddr, mappingBase, mappedBase, deviceAddr, mappingSize, size, localDeviceId);
+        return Status::OK();
+    }
+
+    void ReleaseHostMapping(std::uintptr_t mappingBase)
+    {
+        std::lock_guard<std::mutex> lock(hostMappingMu);
+        auto iter = hostMappings.find(mappingBase);
+        if (iter == hostMappings.end()) {
+            UC_WARN("AICPUTransProvider: host mapping release missed mapping_base={}",
+                    mappingBase);
+            return;
+        }
+        if (--iter->second.refCount != 0) {
+            UC_INFO("AICPUTransProvider: retained host mapping mapping_base={} mapped_base={} "
+                    "ref_count={}",
+                    mappingBase, iter->second.deviceAddr, iter->second.refCount);
+            return;
+        }
+        UC::Trans::Buffer::UnregisterHostBuffer(reinterpret_cast<void*>(mappingBase));
+        UC_INFO("AICPUTransProvider: released host mapping mapping_base={} mapped_base={} "
+                "mapping_size={}",
+                mappingBase, iter->second.deviceAddr, iter->second.size);
+        hostMappings.erase(iter);
+    }
+
+    Status ReleaseMemoryRecord(MemoryRecord& record)
+    {
+        Status status = Status::OK();
+        if (record.mem != nullptr) {
+            const auto ret = HcommMemUnreg(record.endpoint, record.mem);
+            record.mem = nullptr;
+            if (ret != 0) {
+                status = HcommError("HcommMemUnreg", ret, StatusCode::BUFFER_NOT_REGISTERED);
+            }
+        }
+        if (record.ownsHostMapping) {
+            ReleaseHostMapping(record.hostMappingBase);
+            record.ownsHostMapping = false;
+        }
+        return status;
     }
 
     std::uint64_t SendContextFlags() const
@@ -861,6 +970,9 @@ struct AICPUTransProvider::Impl {
     std::unordered_set<ConnectionRecord*> connections;
     std::unordered_set<MemoryRecord*> memories;
     std::uint64_t nextMemTag{1};
+
+    std::mutex hostMappingMu;
+    std::unordered_map<std::uintptr_t, HostMapping> hostMappings;
 
     std::mutex aclMu;
     aclrtStream stream{nullptr};
@@ -1220,9 +1332,11 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
     if (!bindStatus.ok()) { return bindStatus; }
 
     EndpointHandle endpoint = nullptr;
+    CommProtocol endpointProtocol = COMM_PROTOCOL_RESERVED;
     {
         std::lock_guard<std::mutex> lock(impl_->mu);
         endpoint = impl_->endpoint;
+        endpointProtocol = impl_->endpointProtocol;
     }
     if (endpoint == nullptr) {
         UC_ERROR("AICPUTransProvider: RegisterMemory requires an established HCOMM endpoint "
@@ -1235,47 +1349,80 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
     UC_INFO("AICPUTransProvider: RegisterMemory begin desc_count={}", memoryDescs.size());
     std::vector<MemoryRecord*> created;
     created.reserve(memoryDescs.size());
+    auto cleanupCreated = [&]() {
+        std::vector<UnregisterMemoryDesc> cleanup;
+        cleanup.reserve(created.size());
+        for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
+        if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+        created.clear();
+        memoryHandles.clear();
+    };
     for (const auto& desc : memoryDescs) {
         if (desc.addr == 0 || desc.size == 0) {
             UC_ERROR("AICPUTransProvider: RegisterMemory invalid desc addr={} size={} type={}",
                      desc.addr, desc.size, static_cast<int>(desc.memoryType));
-            std::vector<UnregisterMemoryDesc> cleanup;
-            cleanup.reserve(created.size());
-            for (auto* record : created) { cleanup.push_back({nullptr, record}); }
-            if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+            cleanupCreated();
             return Status::Error(StatusCode::INVALID_ARGUMENT,
                                  "AICPUTransProvider::RegisterMemory: zero addr/size in desc");
         }
 
         auto* record = new MemoryRecord{};
         record->endpoint = endpoint;
+        record->originalAddr = desc.addr;
+        record->localAddr = desc.localAddr == 0 ? desc.addr : desc.localAddr;
+        record->transportAddr = desc.addr;
+        record->size = desc.size;
+        record->memoryType = desc.memoryType;
         {
             std::lock_guard<std::mutex> lock(impl_->mu);
             record->tag = impl_->channelName + ":mem:" + std::to_string(impl_->nextMemTag++);
             record->stagedMrId = impl_->nextStagedMrId++;
         }
 
+        if (desc.memoryType == MemType::MEM_HOST && IsUbProtocol(endpointProtocol)) {
+            auto mappingStatus = impl_->AcquireHostMapping(
+                desc.addr, desc.size, record->hostMappingBase, record->transportAddr);
+            if (!mappingStatus.ok()) {
+                delete record;
+                cleanupCreated();
+                return mappingStatus;
+            }
+            record->ownsHostMapping = true;
+        }
+
         CommMem mem{};
-        mem.type = ToHcommMemType(desc.memoryType);
-        mem.addr = reinterpret_cast<void*>(desc.addr);
+        mem.type = record->ownsHostMapping ? COMM_MEM_TYPE_DEVICE : ToHcommMemType(desc.memoryType);
+        mem.addr = reinterpret_cast<void*>(record->transportAddr);
         mem.size = static_cast<std::uint64_t>(desc.size);
-        UC_INFO("AICPUTransProvider: HcommMemReg begin tag={} addr={} size={} mem_type={} "
-                "local_addr={} staged_mr_id={}",
-                record->tag, desc.addr, desc.size, static_cast<int>(desc.memoryType),
-                desc.localAddr, record->stagedMrId);
+        UC_INFO("AICPUTransProvider: HcommMemReg begin tag={} original_addr={} local_addr={} "
+                "transport_addr={} size={} input_mem_type={} hcomm_mem_type={} protocol={} "
+                "owns_host_mapping={} staged_mr_id={}",
+                record->tag, record->originalAddr, record->localAddr, record->transportAddr,
+                record->size, static_cast<int>(desc.memoryType), static_cast<int>(mem.type),
+                CommProtocolName(endpointProtocol), record->ownsHostMapping ? 1 : 0,
+                record->stagedMrId);
         const auto ret = HcommMemReg(endpoint, record->tag.c_str(), &mem, &record->mem);
         if (ret != 0) {
+            (void)impl_->ReleaseMemoryRecord(*record);
             delete record;
-            std::vector<UnregisterMemoryDesc> cleanup;
-            cleanup.reserve(created.size());
-            for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
-            if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+            cleanupCreated();
             return HcommError("HcommMemReg", ret, StatusCode::BUFFER_NOT_SUPPORTED);
         }
 
         HcommMemTokenInfo tokenInfo{};
         const auto tokenRet = HcommMemGetTokenInfo(record->mem, &tokenInfo);
         if (tokenRet == 0) {
+            if (tokenInfo.addr != record->transportAddr || tokenInfo.size != record->size) {
+                UC_ERROR("AICPUTransProvider: HCOMM token range mismatch tag={} "
+                         "transport_addr={} transport_size={} token_addr={} token_size={}",
+                         record->tag, record->transportAddr, record->size, tokenInfo.addr,
+                         tokenInfo.size);
+                (void)impl_->ReleaseMemoryRecord(*record);
+                delete record;
+                cleanupCreated();
+                return Status::Error(StatusCode::BUFFER_NOT_SUPPORTED,
+                                     "AICPUTransProvider: HCOMM token range mismatch");
+            }
             if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_UB && tokenInfo.tokenValue != 0U) {
                 record->tokenId = tokenInfo.tokenValue;
                 record->hasToken = true;
@@ -1284,9 +1431,9 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
                 record->hasToken = true;
             }
             UC_INFO("AICPUTransProvider: HcommMemGetTokenInfo tag={} token_type={} token_id={} "
-                    "has_token={}",
+                    "token_addr={} token_size={} has_token={}",
                     record->tag, static_cast<int>(tokenInfo.type), record->tokenId,
-                    record->hasToken ? 1 : 0);
+                    tokenInfo.addr, tokenInfo.size, record->hasToken ? 1 : 0);
         } else {
             UC_WARN("AICPUTransProvider: HcommMemGetTokenInfo failed tag={} ret={}",
                     record->tag, tokenRet);
@@ -1314,12 +1461,9 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
                 const auto updateRet =
                     HcommChannelUpdateStagedLocalMemInfo(&memHandle, 1U, conn->channel);
                 if (updateRet != 0) {
-                    (void)HcommMemUnreg(record->endpoint, record->mem);
+                    (void)impl_->ReleaseMemoryRecord(*record);
                     delete record;
-                    std::vector<UnregisterMemoryDesc> cleanup;
-                    cleanup.reserve(created.size());
-                    for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
-                    if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+                    cleanupCreated();
                     return HcommConnectionError("HcommChannelUpdateStagedLocalMemInfo", updateRet);
                 }
             } else if (!hasStagedConnection) {
@@ -1327,12 +1471,9 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
                          record->tag, conn->channel);
                 const auto updateRet = HcommChannelUpdateMemInfo(&memHandle, 1U, conn->channel);
                 if (updateRet != 0) {
-                    (void)HcommMemUnreg(record->endpoint, record->mem);
+                    (void)impl_->ReleaseMemoryRecord(*record);
                     delete record;
-                    std::vector<UnregisterMemoryDesc> cleanup;
-                    cleanup.reserve(created.size());
-                    for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
-                    if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+                    cleanupCreated();
                     return HcommConnectionError("HcommChannelUpdateMemInfo", updateRet);
                 }
             }
@@ -1340,12 +1481,9 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
 
         auto publishStatus = impl_->PublishMemoryStaged(*record);
         if (!publishStatus.ok()) {
-            (void)HcommMemUnreg(record->endpoint, record->mem);
+            (void)impl_->ReleaseMemoryRecord(*record);
             delete record;
-            std::vector<UnregisterMemoryDesc> cleanup;
-            cleanup.reserve(created.size());
-            for (auto* existing : created) { cleanup.push_back({nullptr, existing}); }
-            if (!cleanup.empty()) { (void)UnregisterMemory(cleanup); }
+            cleanupCreated();
             return publishStatus;
         }
 
@@ -1355,10 +1493,10 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
         }
         created.push_back(record);
         memoryHandles.push_back(record);
-        UC_INFO("AICPUTransProvider: RegisterMemory record ready tag={} token_id={} "
-                "has_token={} memory_handles={}/{}",
-                record->tag, record->tokenId, record->hasToken ? 1 : 0, memoryHandles.size(),
-                memoryDescs.size());
+        UC_INFO("AICPUTransProvider: RegisterMemory record ready tag={} original_addr={} "
+                "transport_addr={} token_id={} has_token={} memory_handles={}/{}",
+                record->tag, record->originalAddr, record->transportAddr, record->tokenId,
+                record->hasToken ? 1 : 0, memoryHandles.size(), memoryDescs.size());
     }
 
     UC_INFO("AICPUTransProvider: RegisterMemory complete handles={}", memoryHandles.size());
@@ -1385,12 +1523,7 @@ std::vector<Status> AICPUTransProvider::UnregisterMemory(
             impl_->memories.erase(record);
         }
 
-        if (record->mem != nullptr) {
-            const auto ret = HcommMemUnreg(record->endpoint, record->mem);
-            if (ret != 0) {
-                results[index] = HcommError("HcommMemUnreg", ret, StatusCode::BUFFER_NOT_REGISTERED);
-            }
-        }
+        results[index] = impl_->ReleaseMemoryRecord(*record);
         delete record;
     }
     return results;
@@ -1412,6 +1545,21 @@ Status AICPUTransProvider::GetMemTokenId(MemHandle memHandle, uint32_t& tokenId)
                              "not expose a UB token value or RDMA rkey");
     }
     tokenId = record->tokenId;
+    return Status::OK();
+}
+
+Status AICPUTransProvider::GetMemTransportAddr(MemHandle memHandle,
+                                               std::uintptr_t& transportAddr) const
+{
+    transportAddr = 0;
+    auto* record = ToMemoryRecord(memHandle);
+    std::lock_guard<std::mutex> lock(impl_->mu);
+    if (record == nullptr || impl_->memories.find(record) == impl_->memories.end()) {
+        return Status::Error(
+            StatusCode::BUFFER_NOT_REGISTERED,
+            "AICPUTransProvider::GetMemTransportAddr: memory handle not found");
+    }
+    transportAddr = record->transportAddr;
     return Status::OK();
 }
 

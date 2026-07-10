@@ -147,6 +147,7 @@ private:
     std::atomic<MRHandle> nextMrHandle_{1};
     std::unordered_map<MRHandle, RegisteredMemory> registeredRegions_;
     std::unordered_map<MRHandle, RegisteredRegionState> registeredRegionStates_;
+    std::unordered_map<MRHandle, std::uintptr_t> registeredRegionTransportAddrs_;
     std::unordered_map<MRHandle, std::shared_ptr<ConnectionChannel>>
         registeredRegionConnectionLeases_;
 };

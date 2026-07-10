@@ -72,6 +72,9 @@ target_include_directories(asu_transport
         ${UCM_ROOT_DIR}/ucm/shared
 )
 target_compile_definitions(asu_transport PRIVATE SPDLOG_FMT_EXTERNAL)
+if(ASCEND_SUPPORTS_REGISTER_PIN)
+    target_compile_definitions(asu_transport PRIVATE ASCEND_SUPPORTS_REGISTER_PIN=1)
+endif()
 target_link_libraries(asu_transport
     PUBLIC
         pthread fmt spdlog zlibstatic

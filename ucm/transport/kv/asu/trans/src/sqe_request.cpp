@@ -25,6 +25,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -43,12 +44,19 @@ namespace {
 
 constexpr std::size_t kFlagBufferHeaderSize = 16;
 
-Status ResolveSqeMrKeys(const BatchView<KVBuffer>& entries,
-                        const std::unordered_map<MRHandle, RegisteredMemory>& registeredRegions,
-                        std::vector<std::uint32_t>& mrKeys)
+struct ResolvedSqeMemory {
+    std::uint64_t addr{0};
+    std::uint32_t mrKey{0};
+};
+
+Status ResolveSqeMemory(
+    const BatchView<KVBuffer>& entries,
+    const std::unordered_map<MRHandle, RegisteredMemory>& registeredRegions,
+    const std::unordered_map<MRHandle, std::uintptr_t>& registeredTransportAddrs,
+    std::vector<ResolvedSqeMemory>& resolved)
 {
-    mrKeys.clear();
-    mrKeys.reserve(entries.size);
+    resolved.clear();
+    resolved.reserve(entries.size);
     for (std::size_t index = 0; index < entries.size; ++index) {
         const auto handle = entries[index].buffer.handle;
         auto iter = registeredRegions.find(handle);
@@ -56,7 +64,31 @@ Status ResolveSqeMrKeys(const BatchView<KVBuffer>& entries,
             return Status::Error(StatusCode::BUFFER_NOT_REGISTERED,
                                  "entry buffer is not registered");
         }
-        mrKeys.emplace_back(iter->second.tokenId);
+
+        const auto registeredBase = iter->second.region.addr;
+        const auto registeredSize = iter->second.region.size;
+        const auto entryAddr = entries[index].buffer.region.addr;
+        const auto entrySize = entries[index].buffer.region.size;
+        if (entryAddr < registeredBase) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "entry buffer starts before its registered region");
+        }
+        const auto offset = entryAddr - registeredBase;
+        if (offset > registeredSize || entrySize > registeredSize - offset) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "entry buffer exceeds its registered region");
+        }
+
+        auto transportBase = registeredBase;
+        if (auto transportIter = registeredTransportAddrs.find(handle);
+            transportIter != registeredTransportAddrs.end()) {
+            transportBase = transportIter->second;
+        }
+        if (offset > std::numeric_limits<std::uint64_t>::max() - transportBase) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "entry transport address overflows");
+        }
+        resolved.push_back(ResolvedSqeMemory{transportBase + offset, iter->second.tokenId});
     }
     return Status::OK();
 }
@@ -194,7 +226,7 @@ Status PackSubBatchRequest(ProtocolManager& protocolManager, BufferManager& send
 KvBatchStoreRequest BuildBatchStoreRequest(
     const BatchView<KVBuffer>& entries, const std::unordered_map<std::string, std::string>& attrs,
     std::uint16_t cid, const ScatterGatherEntry& flagBuffer,
-    const std::vector<std::uint32_t>& mrKeys)
+    const std::vector<ResolvedSqeMemory>& resolvedMemory)
 {
     KvBatchStoreRequest request;
     request.cid = cid;
@@ -211,8 +243,8 @@ KvBatchStoreRequest BuildBatchStoreRequest(
         KvBatchStoreEntry entry;
         entry.key = entries[index].key;
         entry.offset = entries[index].offset;
-        entry.buffer_addr = entries[index].buffer.region.addr;
-        entry.mr_key = mrKeys[index];
+        entry.buffer_addr = resolvedMemory[index].addr;
+        entry.mr_key = resolvedMemory[index].mrKey;
         entry.length = static_cast<std::uint32_t>(entries[index].buffer.region.size);
         request.entries.emplace_back(std::move(entry));
     }
@@ -222,7 +254,7 @@ KvBatchStoreRequest BuildBatchStoreRequest(
 KvBatchRetrieveRequest BuildBatchRetrieveRequest(
     const BatchView<KVBuffer>& entries, const std::unordered_map<std::string, std::string>& attrs,
     std::uint16_t cid, const ScatterGatherEntry& flagBuffer,
-    const std::vector<std::uint32_t>& mrKeys)
+    const std::vector<ResolvedSqeMemory>& resolvedMemory)
 {
     KvBatchRetrieveRequest request;
     request.cid = cid;
@@ -237,8 +269,8 @@ KvBatchRetrieveRequest BuildBatchRetrieveRequest(
         KvBatchRetrieveEntry entry;
         entry.key = entries[index].key;
         entry.offset = entries[index].offset;
-        entry.buffer_addr = entries[index].buffer.region.addr;
-        entry.mr_key = mrKeys[index];
+        entry.buffer_addr = resolvedMemory[index].addr;
+        entry.mr_key = resolvedMemory[index].mrKey;
         entry.length = static_cast<std::uint32_t>(entries[index].buffer.region.size);
         request.entries.emplace_back(std::move(entry));
     }
@@ -299,18 +331,21 @@ KvKeepAliveRequest BuildKeepAliveRequest(std::uint16_t cid, const ScatterGatherE
 std::unique_ptr<SqeRequest> BuildSqeRequest(
     KvOpcode opcode, const SubBatchRequestSource& source,
     const std::unordered_map<std::string, std::string>& attrs, std::uint16_t cid,
-    const ScatterGatherEntry& flagBuffer, const std::vector<std::uint32_t>* mrKeys,
+    const ScatterGatherEntry& flagBuffer,
+    const std::vector<ResolvedSqeMemory>* resolvedMemory,
     TransportSubBatchContext& subBatchContext)
 {
     switch (opcode) {
         case KvOpcode::BatchRetrieve:
-            if (source.entries == nullptr || mrKeys == nullptr) { return nullptr; }
+            if (source.entries == nullptr || resolvedMemory == nullptr) { return nullptr; }
             return std::make_unique<KvBatchRetrieveRequest>(
-                BuildBatchRetrieveRequest(*source.entries, attrs, cid, flagBuffer, *mrKeys));
+                BuildBatchRetrieveRequest(*source.entries, attrs, cid, flagBuffer,
+                                          *resolvedMemory));
         case KvOpcode::BatchStore:
-            if (source.entries == nullptr || mrKeys == nullptr) { return nullptr; }
+            if (source.entries == nullptr || resolvedMemory == nullptr) { return nullptr; }
             return std::make_unique<KvBatchStoreRequest>(
-                BuildBatchStoreRequest(*source.entries, attrs, cid, flagBuffer, *mrKeys));
+                BuildBatchStoreRequest(*source.entries, attrs, cid, flagBuffer,
+                                       *resolvedMemory));
         case KvOpcode::Delete:
             if (source.keys == nullptr) { return nullptr; }
             return std::make_unique<KvDeleteRequest>(
@@ -343,10 +378,12 @@ Status AsuTransportImpl::SubmitEntrySubBatchRequest(TransportOpType opType,
     subBatchContext.opType = opType;
     subBatchContext.cid = cid;
 
-    std::vector<std::uint32_t> mrKeys;
+    std::vector<ResolvedSqeMemory> resolvedMemory;
     {
         std::lock_guard<std::mutex> lock(registeredRegionsMu_);
-        auto resolveStatus = ResolveSqeMrKeys(subBatch.entries, registeredRegions_, mrKeys);
+        auto resolveStatus =
+            ResolveSqeMemory(subBatch.entries, registeredRegions_, registeredRegionTransportAddrs_,
+                             resolvedMemory);
         if (!resolveStatus.ok()) { return SetSubBatchBuildFailed(subBatchContext, resolveStatus); }
     }
 
@@ -355,7 +392,7 @@ Status AsuTransportImpl::SubmitEntrySubBatchRequest(TransportOpType opType,
     if (!status.ok()) { return status; }
 
     auto request = BuildSqeRequest(opcode, source, config_.attrs, subBatchContext.cid,
-                                   subBatchContext.flagBuffer, &mrKeys, subBatchContext);
+                                   subBatchContext.flagBuffer, &resolvedMemory, subBatchContext);
     return PackSubBatchRequest(*protocolManager_, sendBufferManager_, opcode, *request,
                                subBatchContext);
 }
