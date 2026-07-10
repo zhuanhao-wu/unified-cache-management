@@ -163,6 +163,8 @@ Status LoadTransportConfig(const std::string& configPath, TransportConfig& confi
             continue;
         } else if (ApplyTransportIoNumConfigField(config, key, value)) {
             continue;
+        } else if (ApplyTransportQpNumConfigField(config, key, value)) {
+            continue;
         } else if (ApplyTransportProviderConfigField(config, key, value)) {
             continue;
         } else {

@@ -137,6 +137,9 @@ Status LoadAsuClientConfig(const std::string& configPath, AsuClientConfig& confi
             if (ApplyTransportIoNumConfigField(transportConfig, field.first, field.second)) {
                 continue;
             }
+            if (ApplyTransportQpNumConfigField(transportConfig, field.first, field.second)) {
+                continue;
+            }
             if (ApplyTransportProviderConfigField(transportConfig, field.first, field.second)) {
                 continue;
             }

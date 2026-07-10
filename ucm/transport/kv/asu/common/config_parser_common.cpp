@@ -169,6 +169,21 @@ bool ApplyTransportIoNumConfigField(TransportConfig& config, const std::string& 
     return true;
 }
 
+bool ApplyTransportQpNumConfigField(TransportConfig& config, const std::string& key,
+                                    const std::string& value)
+{
+    if (key == "queryQpNum" || key == "query_qp_num") {
+        config.queryQpNum = static_cast<std::uint32_t>(ParseConfigUint64(value));
+    } else if (key == "loadQpNum" || key == "load_qp_num") {
+        config.loadQpNum = static_cast<std::uint32_t>(ParseConfigUint64(value));
+    } else if (key == "storeQpNum" || key == "store_qp_num") {
+        config.storeQpNum = static_cast<std::uint32_t>(ParseConfigUint64(value));
+    } else {
+        return false;
+    }
+    return true;
+}
+
 bool ApplyTransportProviderConfigField(TransportConfig& config, const std::string& key,
                                        const std::string& value)
 {
