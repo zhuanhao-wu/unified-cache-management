@@ -614,50 +614,66 @@ struct AICPUTransProvider::Impl {
         bool publishMems = false;
         std::string oobHost;
         std::uint16_t oobPort = 0;
-        std::uint32_t clientId = 0;
+        std::vector<std::uint32_t> clientIds;
         {
             std::lock_guard<std::mutex> lock(mu);
             enabled = stagedEnabled;
             publishMems = stagedPublishMems;
             oobHost = activeStagedOobHost;
             oobPort = activeStagedOobPort;
-            clientId = activeStagedClientId;
+            for (auto* conn : connections) {
+                if (conn != nullptr && conn->staged && conn->stagedInfo.clientId != 0U) {
+                    clientIds.push_back(conn->stagedInfo.clientId);
+                }
+            }
+            if (clientIds.empty() && activeStagedClientId != 0U) {
+                clientIds.push_back(activeStagedClientId);
+            }
         }
         if (!enabled || !publishMems || record.stagedPublished) {
             return Status::OK();
         }
-        if (oobHost.empty() || oobPort == 0U) {
+        std::sort(clientIds.begin(), clientIds.end());
+        clientIds.erase(std::unique(clientIds.begin(), clientIds.end()), clientIds.end());
+        if (oobHost.empty() || oobPort == 0U || clientIds.empty()) {
             UC_ERROR("AICPUTransProvider: staged MR publish requires an active staged connection "
-                     "oob_host={} oob_port={}",
-                     oobHost, oobPort);
+                     "oob_host={} oob_port={} client_ids={}",
+                     oobHost, oobPort, clientIds.size());
             return Status::Error(StatusCode::CONNECTION_ERROR,
                                  "AICPUTransProvider: staged MR publish requires an active staged connection");
         }
 
-        UC_INFO("AICPUTransProvider: publishing staged MR tag={} mr_id={} oob={}:{} "
-                "client_id={} request_id={}",
-                record.tag, record.stagedMrId, oobHost, oobPort, clientId, record.stagedMrId + 1U);
         HcommStagedMrDesc mr{};
         mr.memHandle = record.mem;
         mr.mrId = record.stagedMrId;
 
-        HcommStagedMrPublishDesc publish{};
-        const auto initRet = HcommStagedMrPublishDescInit(&publish, 1U);
-        if (initRet != 0) { return HcommError("HcommStagedMrPublishDescInit", initRet); }
-        publish.oobHost = oobHost.c_str();
-        publish.oobPort = oobPort;
-        publish.timeoutMs = sendTimeoutMs;
-        publish.clientId = clientId;
-        publish.requestId = record.stagedMrId + 1U;
-        publish.mrNum = 1U;
-        publish.mrs = &mr;
-        publish.useSeg1Handshake = 1U;
+        for (std::size_t index = 0; index < clientIds.size(); ++index) {
+            const auto clientId = clientIds[index];
+            const auto requestId = record.stagedMrId + 1U + static_cast<std::uint32_t>(index);
+            UC_INFO("AICPUTransProvider: publishing staged MR tag={} mr_id={} oob={}:{} "
+                    "client_id={} request_id={}",
+                    record.tag, record.stagedMrId, oobHost, oobPort, clientId, requestId);
 
-        const auto ret = HcommMemPublishStaged(record.endpoint, &publish);
-        if (ret != 0) { return HcommConnectionError("HcommMemPublishStaged", ret); }
+            HcommStagedMrPublishDesc publish{};
+            const auto initRet = HcommStagedMrPublishDescInit(&publish, 1U);
+            if (initRet != 0) { return HcommError("HcommStagedMrPublishDescInit", initRet); }
+            publish.oobHost = oobHost.c_str();
+            publish.oobPort = oobPort;
+            publish.timeoutMs = sendTimeoutMs;
+            publish.clientId = clientId;
+            publish.requestId = requestId;
+            publish.mrNum = 1U;
+            publish.mrs = &mr;
+            publish.useSeg1Handshake = 1U;
+
+            const auto ret = HcommMemPublishStaged(record.endpoint, &publish);
+            if (ret != 0) { return HcommConnectionError("HcommMemPublishStaged", ret); }
+        }
         record.stagedPublished = true;
-        UC_INFO("AICPUTransProvider: staged MR published tag={} mr_id={} token_id={} has_token={}",
-                record.tag, record.stagedMrId, record.tokenId, record.hasToken ? 1 : 0);
+        UC_INFO("AICPUTransProvider: staged MR published tag={} mr_id={} token_id={} "
+                "has_token={} client_count={}",
+                record.tag, record.stagedMrId, record.tokenId, record.hasToken ? 1 : 0,
+                clientIds.size());
         return Status::OK();
     }
 
@@ -1046,15 +1062,18 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
             record->hasImmOverride = true;
             record->immOverride = stagedInfo.sendImm;
             UC_INFO("AICPUTransProvider: staged channel info qp_index={} controller_id={} "
-                    "send_imm={} client_id={} remote_jetty_id={} remote_token_value={}",
+                    "send_imm={} client_id={} configured_client_id={} remote_jetty_id={} "
+                    "remote_token_value={}",
                     stagedInfo.qpIndex, stagedInfo.controllerId, stagedInfo.sendImm,
-                    stagedInfo.clientId, stagedInfo.remoteJettyId, stagedInfo.remoteTokenValue);
+                    stagedInfo.clientId, stagedClientId, stagedInfo.remoteJettyId,
+                    stagedInfo.remoteTokenValue);
             {
                 std::lock_guard<std::mutex> lock(impl_->mu);
                 impl_->stagedEnabled = true;
                 impl_->activeStagedOobHost = stagedOobHost;
                 impl_->activeStagedOobPort = stagedOobPort;
-                impl_->activeStagedClientId = stagedClientId;
+                impl_->activeStagedClientId =
+                    stagedInfo.clientId == 0U ? stagedClientId : stagedInfo.clientId;
             }
         }
 
