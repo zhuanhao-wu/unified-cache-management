@@ -67,6 +67,18 @@ struct UcmHixlBatchSendParam {
     std::uint32_t complete_sender_cqe;
 };
 
+template <typename T>
+auto SetHcommChannelNameIfSupported(T& desc, const char* channelName, int)
+    -> decltype((void)(desc.channelName = channelName), void())
+{
+    desc.channelName = channelName;
+}
+
+template <typename T>
+void SetHcommChannelNameIfSupported(T&, const char*, ...)
+{
+}
+
 struct ConnectionRecord {
     ::ChannelHandle channel{0};
     ::ThreadHandle thread{0};
@@ -1098,7 +1110,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
                                 static_cast<std::uint16_t>(port));
         desc.ubAttr.sqDepth = impl_->ubSqDepth;
         desc.qos = impl_->qos;
-        desc.channelName = impl_->channelName.c_str();
+        SetHcommChannelNameIfSupported(desc, impl_->channelName.c_str(), 0);
 
         EndpointHandle hcommEndpoint = nullptr;
         {
