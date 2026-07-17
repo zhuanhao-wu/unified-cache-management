@@ -75,7 +75,7 @@ Status ConvertStatus(const AsuStatus& status)
         case AsuStatusCode::TASK_NOT_FOUND: return Status::NotFound();
         case AsuStatusCode::TIMEOUT: return Status::Timeout();
         case AsuStatusCode::BUFFER_NOT_SUPPORTED:
-        case AsuStatusCode::UNSUPPORTED: return Status::Unsupported();
+        case AsuStatusCode::UNSUPPORTED: return Status::Unsupported(message);
         case AsuStatusCode::RESOURCE_BUSY:
         case AsuStatusCode::IN_PROGRESS: return Status::Retry();
         default: return Status::Error(message);
@@ -353,8 +353,15 @@ public:
     {
         auto config = ParseConfig(inConfig);
         NormalizeAsuShardConfig(config);
+        UC_INFO("Initializing ASU store: mode={}, provider={}, config_path={}, asu_id_count={}, "
+                "asu_ip_count={}, device_id={}.",
+                config.mode, TransProviderBackendName(config.transProviderType), config.configPath,
+                config.asuIds.size(), config.asuIps.size(), config.deviceId);
         auto status = CheckConfig(config);
-        if (status.Failure()) { return status; }
+        if (status.Failure()) {
+            UC_ERROR("ASU store config validation failed: {}.", status.ToString());
+            return status;
+        }
 
         config_ = std::move(config);
         backend_ = CreateBackend(config_);
@@ -550,7 +557,7 @@ private:
             return Status::InvalidParam("asu_ips size must match asu_ids size");
         }
         if (config.transProviderType == UC::ASU::TransProviderType::UNSUPPORTED) {
-            return Status::Unsupported();
+            return Status::Unsupported("unsupported asu_trans_provider_backend");
         }
         if (config.transProviderType == UC::ASU::TransProviderType::FAKE &&
             !config.configPath.empty()) {

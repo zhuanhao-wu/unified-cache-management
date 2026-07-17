@@ -107,7 +107,11 @@ public:
         ThrowIfFailed(loader.LoadLibrary());
         auto store = loader.CreateObject();
         if (!store) { throw std::runtime_error{"failed to create store(" + name + ")"}; }
-        ThrowIfFailed(store->Setup(config));
+        const auto status = store->Setup(config);
+        if (status.Failure()) {
+            throw std::runtime_error{"failed to setup store(" + name + "): " +
+                                     status.ToString()};
+        }
         loaders_.push_back(std::move(loader));
         stores_.push_back(std::move(store));
     }
