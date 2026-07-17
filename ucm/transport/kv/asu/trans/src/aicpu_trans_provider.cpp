@@ -17,6 +17,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cctype>
+#include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -45,16 +46,21 @@ constexpr std::uint32_t kKernelBlockDim = 1U;
 constexpr std::uintptr_t kHostRegisterAlignment = 4096U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
 constexpr const char* kProviderSignature =
-    "UCM_ASU_AICPU_STAGED_URMA_HOST_MAPPED_PAYLOAD_MR_V4";
+    "UCM_ASU_AICPU_STAGED_URMA_HCOMM_SEND_WITH_IMM_V5";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
 constexpr const char* kDefaultAscendHome = "/usr/local/Ascend/cann";
 constexpr const char* kHixlKernelJsonSuffix =
     "/opp/built-in/op_impl/aicpu/config/libcann_hixl_kernel.json";
 
+// Local mirror of the HixlBatchSend AICPU launch ABI. It assumes 64-bit handles and pointers:
+// UcmHixlSendIoBatch is 32 bytes with imm_data at offset 24, and UcmHixlBatchSendParam is 56 bytes.
+// Keep this layout synchronized with hixl_send.h when extending either structure.
 struct UcmHixlSendIoBatch {
     ::ChannelHandle channel;
     const void* local_src;
     std::uint64_t len;
+    std::uint32_t imm_data;
+    std::uint32_t reserved;
 };
 
 struct UcmHixlBatchSendParam {
@@ -66,6 +72,12 @@ struct UcmHixlBatchSendParam {
     void* stats;
     std::uint32_t complete_sender_cqe;
 };
+
+static_assert(sizeof(::ChannelHandle) == 8U, "HixlBatchSend requires 64-bit Hcomm handles");
+static_assert(sizeof(UcmHixlSendIoBatch) == 32U, "UcmHixlSendIoBatch ABI changed");
+static_assert(offsetof(UcmHixlSendIoBatch, imm_data) == 24U,
+              "UcmHixlSendIoBatch IMM offset changed");
+static_assert(sizeof(UcmHixlBatchSendParam) == 56U, "UcmHixlBatchSendParam ABI changed");
 
 template <typename T>
 auto SetHcommChannelNameIfSupported(T& desc, const char* channelName, int)
@@ -82,9 +94,6 @@ void SetHcommChannelNameIfSupported(T&, const char*, ...)
 struct ConnectionRecord {
     ::ChannelHandle channel{0};
     ::ThreadHandle thread{0};
-    HcommA5UdmaSendChannelContext sendContext{};
-    bool sendContextUsable{false};
-    void* deviceSendContext{nullptr};
     bool staged{false};
     bool hasImmOverride{false};
     std::uint32_t immOverride{0};
@@ -798,42 +807,6 @@ struct AICPUTransProvider::Impl {
         return status;
     }
 
-    std::uint64_t SendContextFlags() const
-    {
-        std::uint64_t flags = completeSenderCqe ? HCOMM_A5_UDMA_SEND_CONTEXT_FLAG_SENDER_CQE : 0U;
-        if (sendWithImm) { flags |= HCOMM_A5_UDMA_SEND_CONTEXT_FLAG_WITH_IMM; }
-        return flags;
-    }
-
-    Status EnsureDeviceSendContextLocked(ConnectionRecord& record)
-    {
-        const auto effectiveImm = record.hasImmOverride ? record.immOverride : immData;
-        UC_DEBUG("AICPUTransProvider: initializing A5 send context channel={} effective_imm={} "
-                 "has_imm_override={} send_with_imm={} complete_sender_cqe={}",
-                 record.channel, effectiveImm, record.hasImmOverride ? 1 : 0,
-                 sendWithImm ? 1 : 0, completeSenderCqe ? 1 : 0);
-        const auto initRet =
-            HcommA5UdmaSendContextInit(record.channel, effectiveImm, SendContextFlags(), &record.sendContext);
-        if (initRet != 0) { return HcommConnectionError("HcommA5UdmaSendContextInit", initRet); }
-
-        if (record.deviceSendContext == nullptr) {
-            void* deviceContext = nullptr;
-            const auto mallocRet =
-                aclrtMalloc(&deviceContext, sizeof(record.sendContext), ACL_MEM_MALLOC_NORMAL_ONLY);
-            if (mallocRet != ACL_SUCCESS) { return AclError("aclrtMalloc A5 send context", mallocRet); }
-            record.deviceSendContext = deviceContext;
-        }
-
-        const auto copyRet =
-            aclrtMemcpy(record.deviceSendContext, sizeof(record.sendContext), &record.sendContext,
-                        sizeof(record.sendContext), ACL_MEMCPY_HOST_TO_DEVICE);
-        if (copyRet != ACL_SUCCESS) { return AclError("aclrtMemcpy A5 send context", copyRet); }
-        record.sendContextUsable = true;
-        UC_DEBUG("AICPUTransProvider: A5 send context ready channel={} device_context={}",
-                 record.channel, record.deviceSendContext);
-        return Status::OK();
-    }
-
     Status EnsureAclStreamLocked()
     {
         if (stream != nullptr) { return Status::OK(); }
@@ -866,6 +839,10 @@ struct AICPUTransProvider::Impl {
     Status LaunchBatchSendLocked(const std::vector<TransProvider::SendIoBatch>& ioBatches,
                                  std::vector<std::uint32_t>& hixlStatuses)
     {
+        if (!sendWithImm) {
+            return Status::Error(StatusCode::UNSUPPORTED,
+                                 "AICPUTransProvider::Send: HixlBatchSend requires send_with_imm");
+        }
         hixlStatuses.assign(ioBatches.size(), 1U);
         auto status = EnsureAclStreamLocked();
         if (!status.ok()) { return status; }
@@ -875,9 +852,9 @@ struct AICPUTransProvider::Impl {
         ::ThreadHandle thread = 0;
         for (const auto& io : ioBatches) {
             auto* conn = ToConnectionRecord(io.connectionHandle);
-            if (conn == nullptr || !conn->sendContextUsable || conn->deviceSendContext == nullptr) {
+            if (conn == nullptr || conn->channel == 0U || conn->thread == 0U) {
                 return Status::Error(StatusCode::CONNECTION_ERROR,
-                                     "AICPUTransProvider::Send: A5 send context is not ready");
+                                     "AICPUTransProvider::Send: Hcomm channel is not ready");
             }
             if (thread == 0) {
                 thread = conn->thread;
@@ -886,8 +863,11 @@ struct AICPUTransProvider::Impl {
                                      "AICPUTransProvider::Send: mixed AICPU threads in one batch "
                                      "are not supported by HixlBatchSend");
             }
+            const auto effectiveImm = conn->hasImmOverride ? conn->immOverride : immData;
             batches.push_back(UcmHixlSendIoBatch{
-                reinterpret_cast<::ChannelHandle>(conn->deviceSendContext), io.sendBuffer, io.len});
+                conn->channel, io.sendBuffer, io.len, effectiveImm, 0U});
+            UC_DEBUG("AICPUTransProvider: batch send entry channel={} thread={} addr={} len={} imm=0x{:x}",
+                     conn->channel, conn->thread, io.sendBuffer, io.len, effectiveImm);
         }
         if (thread == 0) {
             return Status::Error(StatusCode::CONNECTION_ERROR,
@@ -1202,23 +1182,6 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
         }
 
         {
-            std::lock_guard<std::mutex> lock(impl_->aclMu);
-            status = impl_->EnsureDeviceSendContextLocked(*record);
-        }
-        if (!status.ok()) {
-            if (record->deviceSendContext != nullptr) {
-                (void)aclrtFree(record->deviceSendContext);
-                record->deviceSendContext = nullptr;
-            }
-            auto channel = record->channel;
-            (void)HcommChannelDestroy(&channel, 1U);
-            (void)HcommThreadFree(&record->thread, 1U);
-            delete record;
-            if (!createdHandles.empty()) { (void)DeleteConnections(createdHandles); }
-            return status;
-        }
-
-        {
             std::lock_guard<std::mutex> lock(impl_->mu);
             impl_->connections.insert(record);
         }
@@ -1257,12 +1220,6 @@ std::vector<Status> AICPUTransProvider::DeleteConnections(
         }
 
         Status status = Status::OK();
-        if (record->deviceSendContext != nullptr) {
-            std::lock_guard<std::mutex> lock(impl_->aclMu);
-            const auto ret = aclrtFree(record->deviceSendContext);
-            record->deviceSendContext = nullptr;
-            if (ret != ACL_SUCCESS) { status = AclError("aclrtFree A5 send context", ret); }
-        }
         if (record->channel != 0) {
             auto channel = record->channel;
             const auto ret = HcommChannelDestroy(&channel, 1U);
@@ -1286,7 +1243,15 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
     (void)quietCount;
     if (ioBatches.empty()) { return {}; }
 
+    struct ThreadBatchGroup {
+        ::ThreadHandle thread{0};
+        std::vector<std::size_t> originalIndexes;
+        std::vector<SendIoBatch> batches;
+    };
+
     std::vector<Status> results(ioBatches.size(), Status::OK());
+    std::vector<ThreadBatchGroup> groups;
+    std::unordered_map<::ThreadHandle, std::size_t> groupIndexByThread;
     bool valid = true;
     {
         std::lock_guard<std::mutex> lock(impl_->mu);
@@ -1303,7 +1268,20 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
                 results[index] = Status::Error(StatusCode::INVALID_ARGUMENT,
                                                "AICPUTransProvider::Send: empty send buffer");
                 valid = false;
+                continue;
             }
+            if (conn->thread == 0U) {
+                results[index] = Status::Error(StatusCode::CONNECTION_ERROR,
+                                               "AICPUTransProvider::Send: Hcomm thread is not ready");
+                valid = false;
+                continue;
+            }
+
+            auto [groupIt, inserted] = groupIndexByThread.emplace(conn->thread, groups.size());
+            if (inserted) { groups.push_back(ThreadBatchGroup{conn->thread, {}, {}}); }
+            auto& group = groups[groupIt->second];
+            group.originalIndexes.push_back(index);
+            group.batches.push_back(item);
         }
     }
     if (!valid) { return results; }
@@ -1315,20 +1293,37 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
     const auto deviceStatus = impl_->EnsureAclDeviceBound("Send");
     if (!deviceStatus.ok()) { return std::vector<Status>(ioBatches.size(), deviceStatus); }
 
-    std::vector<std::uint32_t> hixlStatuses;
-    Status launchStatus = Status::OK();
     {
         std::lock_guard<std::mutex> lock(impl_->aclMu);
-        launchStatus = impl_->LaunchBatchSendLocked(ioBatches, hixlStatuses);
-    }
-    if (!launchStatus.ok()) { return std::vector<Status>(ioBatches.size(), launchStatus); }
-
-    for (std::size_t index = 0; index < hixlStatuses.size(); ++index) {
-        if (hixlStatuses[index] == 0U) { continue; }
-        results[index] = Status::Error(StatusCode::INTERNAL_ERROR,
-                                       "HixlBatchSend failed for batch index " +
-                                           std::to_string(index) + " status=" +
-                                           std::to_string(hixlStatuses[index]));
+        for (const auto& group : groups) {
+            UC_DEBUG("AICPUTransProvider: launching HixlBatchSend thread={} entries={}",
+                     group.thread, group.batches.size());
+            std::vector<std::uint32_t> hixlStatuses;
+            const auto launchStatus = impl_->LaunchBatchSendLocked(group.batches, hixlStatuses);
+            if (!launchStatus.ok()) {
+                for (const auto originalIndex : group.originalIndexes) {
+                    results[originalIndex] = launchStatus;
+                }
+                continue;
+            }
+            if (hixlStatuses.size() != group.originalIndexes.size()) {
+                const auto status = Status::Error(
+                    StatusCode::INTERNAL_ERROR,
+                    "HixlBatchSend returned an unexpected status count");
+                for (const auto originalIndex : group.originalIndexes) {
+                    results[originalIndex] = status;
+                }
+                continue;
+            }
+            for (std::size_t groupIndex = 0; groupIndex < hixlStatuses.size(); ++groupIndex) {
+                if (hixlStatuses[groupIndex] == 0U) { continue; }
+                const auto originalIndex = group.originalIndexes[groupIndex];
+                results[originalIndex] = Status::Error(
+                    StatusCode::INTERNAL_ERROR,
+                    "HixlBatchSend failed for batch index " + std::to_string(originalIndex) +
+                        " status=" + std::to_string(hixlStatuses[groupIndex]));
+            }
+        }
     }
     return results;
 }
