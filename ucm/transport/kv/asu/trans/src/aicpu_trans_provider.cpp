@@ -140,6 +140,61 @@ Status AclError(const std::string& op, aclError ret, StatusCode code = StatusCod
     return Status::Error(code, std::move(message));
 }
 
+// aclrtSetDevice changes the current ACL context of the calling thread. Preserve an existing
+// framework context while the provider temporarily binds the ASU device for HCOMM/HIXL calls.
+class AclContextScope final {
+public:
+    explicit AclContextScope(const char* stage) : stage_(stage)
+    {
+        const auto ret = aclrtGetCurrentContext(&savedContext_);
+        if (ret != ACL_SUCCESS || savedContext_ == nullptr) {
+            UC_DEBUG("AICPUTransProvider: no ACL context to preserve stage={} "
+                     "aclrtGetCurrentContext_ret={}",
+                     stage_, static_cast<int>(ret));
+            savedContext_ = nullptr;
+            return;
+        }
+
+        const auto getDeviceRet = aclrtGetDevice(&savedDevice_);
+        UC_DEBUG("AICPUTransProvider: preserved caller ACL context stage={} context={} "
+                 "device_id={} aclrtGetDevice_ret={}",
+                 stage_, static_cast<const void*>(savedContext_), savedDevice_,
+                 static_cast<int>(getDeviceRet));
+    }
+
+    ~AclContextScope()
+    {
+        if (savedContext_ == nullptr) { return; }
+
+        aclrtContext currentContext = nullptr;
+        const auto getRet = aclrtGetCurrentContext(&currentContext);
+        if (getRet == ACL_SUCCESS && currentContext == savedContext_) { return; }
+
+        const auto setRet = aclrtSetCurrentContext(savedContext_);
+        if (setRet != ACL_SUCCESS) {
+            const char* recent = aclGetRecentErrMsg();
+            UC_ERROR("AICPUTransProvider: failed to restore caller ACL context stage={} "
+                     "context={} device_id={} ret={} msg={}",
+                     stage_, static_cast<const void*>(savedContext_), savedDevice_,
+                     static_cast<int>(setRet), recent == nullptr ? "" : recent);
+            return;
+        }
+
+        UC_DEBUG("AICPUTransProvider: restored caller ACL context stage={} context={} "
+                 "device_id={} previous_context={} aclrtGetCurrentContext_ret={}",
+                 stage_, static_cast<const void*>(savedContext_), savedDevice_,
+                 static_cast<const void*>(currentContext), static_cast<int>(getRet));
+    }
+
+    AclContextScope(const AclContextScope&) = delete;
+    AclContextScope& operator=(const AclContextScope&) = delete;
+
+private:
+    const char* stage_{nullptr};
+    aclrtContext savedContext_{nullptr};
+    std::int32_t savedDevice_{-1};
+};
+
 std::string Normalize(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(),
@@ -521,6 +576,7 @@ struct AICPUTransProvider::Impl {
 
     ~Impl()
     {
+        AclContextScope contextScope("AICPUTransProvider cleanup");
         if (hixlBin != nullptr || stream != nullptr || endpoint != nullptr) {
             const auto deviceStatus = EnsureAclDeviceBound("AICPUTransProvider cleanup");
             if (!deviceStatus.ok()) {
@@ -1016,6 +1072,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     connectionHandles.clear();
     if (qpNum == 0) { return Status::OK(); }
 
+    AclContextScope contextScope("CreateConnection");
     auto status = impl_->EnsureAclDeviceBound("CreateConnection");
     if (!status.ok()) { return status; }
 
@@ -1201,11 +1258,12 @@ std::vector<Status> AICPUTransProvider::DeleteConnections(
     const std::vector<ConnectionHandle>& connectionHandles)
 {
     std::vector<Status> results(connectionHandles.size(), Status::OK());
-    if (!connectionHandles.empty()) {
-        const auto deviceStatus = impl_->EnsureAclDeviceBound("DeleteConnections");
-        if (!deviceStatus.ok()) {
-            return std::vector<Status>(connectionHandles.size(), deviceStatus);
-        }
+    if (connectionHandles.empty()) { return results; }
+
+    AclContextScope contextScope("DeleteConnections");
+    const auto deviceStatus = impl_->EnsureAclDeviceBound("DeleteConnections");
+    if (!deviceStatus.ok()) {
+        return std::vector<Status>(connectionHandles.size(), deviceStatus);
     }
     for (std::size_t index = 0; index < connectionHandles.size(); ++index) {
         auto* record = ToConnectionRecord(connectionHandles[index]);
@@ -1290,6 +1348,7 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
         return hook(ioBatches, kernelCount, quietCount);
     }
 
+    AclContextScope contextScope("Send");
     const auto deviceStatus = impl_->EnsureAclDeviceBound("Send");
     if (!deviceStatus.ok()) { return std::vector<Status>(ioBatches.size(), deviceStatus); }
 
@@ -1335,6 +1394,7 @@ Status AICPUTransProvider::RegisterMemory(ConnectionHandle,
     memoryHandles.clear();
     if (memoryDescs.empty()) { return Status::OK(); }
 
+    AclContextScope contextScope("RegisterMemory");
     auto bindStatus = impl_->EnsureAclDeviceBound("RegisterMemory");
     if (!bindStatus.ok()) { return bindStatus; }
 
@@ -1514,10 +1574,11 @@ std::vector<Status> AICPUTransProvider::UnregisterMemory(
     const std::vector<UnregisterMemoryDesc>& memoryDescs)
 {
     std::vector<Status> results(memoryDescs.size(), Status::OK());
-    if (!memoryDescs.empty()) {
-        const auto deviceStatus = impl_->EnsureAclDeviceBound("UnregisterMemory");
-        if (!deviceStatus.ok()) { return std::vector<Status>(memoryDescs.size(), deviceStatus); }
-    }
+    if (memoryDescs.empty()) { return results; }
+
+    AclContextScope contextScope("UnregisterMemory");
+    const auto deviceStatus = impl_->EnsureAclDeviceBound("UnregisterMemory");
+    if (!deviceStatus.ok()) { return std::vector<Status>(memoryDescs.size(), deviceStatus); }
     for (std::size_t index = 0; index < memoryDescs.size(); ++index) {
         auto* record = ToMemoryRecord(memoryDescs[index].memoryHandle);
         {
