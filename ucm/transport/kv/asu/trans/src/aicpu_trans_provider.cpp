@@ -47,7 +47,7 @@ constexpr std::uint32_t kKernelBlockDim = 1U;
 constexpr std::uintptr_t kHostRegisterAlignment = 4096U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
 constexpr const char* kProviderSignature =
-    "UCM_ASU_AICPU_STAGED_URMA_HCOMM_SEND_WITH_IMM_V6";
+    "UCM_ASU_AICPU_STAGED_URMA_HCOMM_SEND_WITH_IMM_V7";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
 constexpr const char* kDefaultAscendHome = "/usr/local/Ascend/cann";
 constexpr const char* kHixlKernelJsonSuffix =
@@ -397,6 +397,13 @@ LocalDeviceSelection ResolveLocalDevice(const TransportConfig& config)
     return {static_cast<std::uint32_t>(currentDevice), currentContext, "current_acl"};
 }
 
+bool UsesCurrentAclDeviceSelection(const TransportConfig& config)
+{
+    const auto mode =
+        Normalize(GetConfigAttr(config, {"aicpu_device_selection", "device_selection"}));
+    return mode == "current_acl" || mode == "current" || mode == "runtime";
+}
+
 std::pair<std::string, std::string> ResolveLocalEndpointAddress(
     const TransportConfig& config, std::uint32_t logicalDeviceId, const std::string& fallback)
 {
@@ -512,7 +519,7 @@ Status FillCommAddr(const std::string& text, CommAddr& out)
 
 Status BuildEndpointDesc(const TransportConfig& config, const AsuEndpoint* endpoint,
                          const std::string& addr, std::uint32_t deviceId, CommProtocol protocol,
-                         EndpointDesc& out)
+                         const char* role, EndpointDesc& out)
 {
     const auto init = EndpointDescInit(&out, 1U);
     if (init != 0) { return HcommError("EndpointDescInit", init); }
@@ -520,9 +527,10 @@ Status BuildEndpointDesc(const TransportConfig& config, const AsuEndpoint* endpo
     out.protocol = protocol;
     auto status = FillCommAddr(addr, out.commAddr);
     if (!status.ok()) { return status; }
-    UC_DEBUG("AICPUTransProvider: EndpointDesc resolved addr={} addr_type={} device_id={} "
-             "protocol={}",
-             addr, CommAddrTypeName(out.commAddr.type), deviceId, CommProtocolName(protocol));
+    UC_DEBUG("AICPUTransProvider: EndpointDesc resolved role={} addr={} addr_type={} "
+             "device_id={} protocol={}",
+             role, addr, CommAddrTypeName(out.commAddr.type), deviceId,
+             CommProtocolName(protocol));
 
     out.loc.locType = ResolveLocType(config, endpoint);
     if (out.loc.locType == ENDPOINT_LOC_TYPE_DEVICE) {
@@ -640,6 +648,7 @@ struct AICPUTransProvider::Impl {
         localDeviceId = selection.deviceId;
         providerContext = selection.context;
         deviceSelectionSource = std::move(selection.source);
+        currentAclDeviceSelection = UsesCurrentAclDeviceSelection(configIn);
         if (channelName.empty()) { channelName = kDefaultChannelName; }
     }
 
@@ -682,6 +691,51 @@ struct AICPUTransProvider::Impl {
         return byAddr == config.endpoints.end() ? nullptr : &*byAddr;
     }
 
+    Status RefreshLocalDeviceFromCaller()
+    {
+        if (!currentAclDeviceSelection) { return Status::OK(); }
+
+        std::int32_t currentDevice = -1;
+        const auto deviceRet = aclrtGetDevice(&currentDevice);
+        if (deviceRet != ACL_SUCCESS) {
+            return AclError("aclrtGetDevice before CreateConnection", deviceRet);
+        }
+        if (currentDevice < 0) {
+            return Status::Error(StatusCode::INVALID_ARGUMENT,
+                                 "AICPUTransProvider: caller ACL device is invalid");
+        }
+
+        aclrtContext currentContext = nullptr;
+        const auto contextRet = aclrtGetCurrentContext(&currentContext);
+        if (contextRet != ACL_SUCCESS) {
+            UC_WARN("AICPUTransProvider: cannot capture caller ACL context before "
+                    "CreateConnection logical_device_id={} ret={}; device binding will use "
+                    "aclrtSetDevice",
+                    currentDevice, static_cast<int>(contextRet));
+            currentContext = nullptr;
+        }
+
+        std::lock_guard<std::mutex> lock(mu);
+        if (endpoint != nullptr || !connections.empty()) {
+            if (localDeviceId != static_cast<std::uint32_t>(currentDevice)) {
+                return Status::Error(
+                    StatusCode::INVALID_ARGUMENT,
+                    "AICPUTransProvider: caller logical device changed after endpoint creation");
+            }
+            return Status::OK();
+        }
+
+        UC_INFO("AICPUTransProvider: refreshed Provider ACL binding at CreateConnection "
+                "old_logical_device_id={} new_logical_device_id={} old_context={} "
+                "new_context={}",
+                localDeviceId, currentDevice, static_cast<const void*>(providerContext),
+                static_cast<const void*>(currentContext));
+        localDeviceId = static_cast<std::uint32_t>(currentDevice);
+        providerContext = currentContext;
+        deviceSelectionSource = "current_acl_create_connection";
+        return Status::OK();
+    }
+
     Status EnsureEndpointLocked(const std::string& localIp, CommProtocol protocol)
     {
         if (endpoint != nullptr) {
@@ -710,7 +764,8 @@ struct AICPUTransProvider::Impl {
                 resolvedLocalIp, addressSource, localDeviceId, deviceSelectionSource,
                 static_cast<const void*>(providerContext), CommProtocolName(protocol));
         EndpointDesc localDesc{};
-        auto status = BuildEndpointDesc(config, nullptr, resolvedLocalIp, localDeviceId, protocol, localDesc);
+        auto status = BuildEndpointDesc(config, nullptr, resolvedLocalIp, localDeviceId, protocol,
+                                        "local", localDesc);
         if (!status.ok()) {
             UC_ERROR("AICPUTransProvider: local EndpointDesc build failed local_addr={} "
                      "local_device_id={} protocol={} message={}",
@@ -1090,6 +1145,7 @@ struct AICPUTransProvider::Impl {
     std::uint32_t localDeviceId{0};
     aclrtContext providerContext{nullptr};
     std::string deviceSelectionSource{"default"};
+    bool currentAclDeviceSelection{false};
     std::uint32_t notifyNum{kDefaultNotifyNum};
     std::uint32_t ubSqDepth{kDefaultUbSqDepth};
     std::uint32_t qos{0};
@@ -1111,6 +1167,7 @@ struct AICPUTransProvider::Impl {
     std::uint32_t nextStagedMrId{0};
 
     std::mutex mu;
+    std::mutex connectionInitMu;
     EndpointHandle endpoint{nullptr};
     std::string endpointIp;
     CommProtocol endpointProtocol{COMM_PROTOCOL_RESERVED};
@@ -1175,7 +1232,10 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     if (qpNum == 0) { return Status::OK(); }
 
     AclContextScope contextScope("CreateConnection");
-    auto status = impl_->EnsureAclDeviceBound("CreateConnection");
+    std::unique_lock<std::mutex> initLock(impl_->connectionInitMu);
+    auto status = impl_->RefreshLocalDeviceFromCaller();
+    if (!status.ok()) { return status; }
+    status = impl_->EnsureAclDeviceBound("CreateConnection");
     if (!status.ok()) { return status; }
 
     const auto* endpoint = impl_->FindEndpoint(remoteIp, port);
@@ -1191,7 +1251,8 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
             CommProtocolName(protocol), endpoint == nullptr ? 0 : 1);
 
     EndpointDesc remoteDesc{};
-    status = BuildEndpointDesc(impl_->config, endpoint, remoteIp, remoteDeviceId, protocol, remoteDesc);
+    status = BuildEndpointDesc(impl_->config, endpoint, remoteIp, remoteDeviceId, protocol,
+                               "remote", remoteDesc);
     if (!status.ok()) {
         UC_ERROR("AICPUTransProvider: remote EndpointDesc build failed remote_addr={} "
                  "remote_port={} remote_device_id={} protocol={} message={}",
@@ -1209,6 +1270,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
             return status;
         }
     }
+    initLock.unlock();
 
     std::vector<ConnectionHandle> createdHandles;
     createdHandles.reserve(qpNum);
