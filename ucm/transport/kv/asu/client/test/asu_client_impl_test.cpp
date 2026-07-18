@@ -506,6 +506,9 @@ TEST(AsuClientImplTest, Lifecycle_PublicInitLoadsClientConfigFile)
         configFile << "transport.batch_store_io_num=12\n";
         configFile << "transport.delete_io_num=13\n";
         configFile << "transport.query_io_num=14\n";
+        configFile << "transport.aicpu_device_selection=current_acl\n";
+        configFile << "transport.aicpu_local_eid.0=eid:00112233445566778899aabbccddeeff\n";
+        configFile << "transport.aicpu_local_eid.1=eid:ffeeddccbbaa99887766554433221100\n";
         configFile << "asuInfo.20=protocol=roce,placement=device,port=6000,"
                    << "local.comm_id=192.168.1.20,local.logical_device_id=6\n";
     }
@@ -530,6 +533,11 @@ TEST(AsuClientImplTest, Lifecycle_PublicInitLoadsClientConfigFile)
         EXPECT_EQ(state->initConfigs[asuId].asuBatchStoreIoNum, std::size_t{12});
         EXPECT_EQ(state->initConfigs[asuId].asuDeleteIoNum, std::size_t{13});
         EXPECT_EQ(state->initConfigs[asuId].asuQueryIoNum, std::size_t{14});
+        EXPECT_EQ(state->initConfigs[asuId].attrs.at("aicpu_device_selection"), "current_acl");
+        EXPECT_EQ(state->initConfigs[asuId].attrs.at("aicpu_local_eid.0"),
+                  "eid:00112233445566778899aabbccddeeff");
+        EXPECT_EQ(state->initConfigs[asuId].attrs.at("aicpu_local_eid.1"),
+                  "eid:ffeeddccbbaa99887766554433221100");
     }
 }
 

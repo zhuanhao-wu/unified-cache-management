@@ -25,6 +25,7 @@
 #include <limits>
 #include <mutex>
 #include <string>
+#include <unistd.h>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -46,7 +47,7 @@ constexpr std::uint32_t kKernelBlockDim = 1U;
 constexpr std::uintptr_t kHostRegisterAlignment = 4096U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
 constexpr const char* kProviderSignature =
-    "UCM_ASU_AICPU_STAGED_URMA_HCOMM_SEND_WITH_IMM_V5";
+    "UCM_ASU_AICPU_STAGED_URMA_HCOMM_SEND_WITH_IMM_V6";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
 constexpr const char* kDefaultAscendHome = "/usr/local/Ascend/cann";
 constexpr const char* kHixlKernelJsonSuffix =
@@ -337,15 +338,80 @@ bool TryFillEidCommAddr(const std::string& text, CommAddr& out)
     return true;
 }
 
-std::uint32_t ResolveDeviceId(const TransportConfig& config)
+struct LocalDeviceSelection {
+    std::uint32_t deviceId{0};
+    aclrtContext context{nullptr};
+    std::string source{"default"};
+};
+
+LocalDeviceSelection ResolveConfiguredDevice(const TransportConfig& config)
 {
-    const auto explicitDevice = GetConfigAttr(config, {"device_id", "deviceId", "logical_device_id"});
-    if (!explicitDevice.empty()) { return ParseUint32(explicitDevice, 0); }
-    for (const auto& endpoint : config.endpoints) {
-        if (endpoint.deviceId >= 0) { return static_cast<std::uint32_t>(endpoint.deviceId); }
+    const auto explicitDevice =
+        GetConfigAttr(config, {"device_id", "deviceId", "logical_device_id"});
+    if (!explicitDevice.empty()) {
+        return {ParseUint32(explicitDevice, 0), nullptr, "config"};
     }
     const char* env = std::getenv("UMC_ASU_DEVICE_ID");
-    return env == nullptr ? 0 : ParseUint32(env, 0);
+    if (env != nullptr) { return {ParseUint32(env, 0), nullptr, "environment"}; }
+
+    // Keep the endpoint fallback for existing kv-test configurations. New configurations should
+    // set transport.device_id explicitly because endpoint.deviceId describes the remote endpoint.
+    for (const auto& endpoint : config.endpoints) {
+        if (endpoint.deviceId >= 0) {
+            return {static_cast<std::uint32_t>(endpoint.deviceId), nullptr, "endpoint_fallback"};
+        }
+    }
+    return {};
+}
+
+LocalDeviceSelection ResolveLocalDevice(const TransportConfig& config)
+{
+    auto configured = ResolveConfiguredDevice(config);
+    auto mode = Normalize(GetConfigAttr(config, {"aicpu_device_selection", "device_selection"}));
+    if (mode.empty() || mode == "config" || mode == "configured") { return configured; }
+    if (mode != "current_acl" && mode != "current" && mode != "runtime") {
+        UC_WARN("AICPUTransProvider: unknown aicpu_device_selection={} using configured "
+                "logical_device_id={}",
+                mode, configured.deviceId);
+        return configured;
+    }
+
+    std::int32_t currentDevice = -1;
+    const auto deviceRet = aclrtGetDevice(&currentDevice);
+    if (deviceRet != ACL_SUCCESS || currentDevice < 0) {
+        UC_WARN("AICPUTransProvider: current ACL logical device unavailable ret={} device_id={}; "
+                "using configured logical_device_id={} source={}",
+                static_cast<int>(deviceRet), currentDevice, configured.deviceId, configured.source);
+        configured.source = "current_acl_fallback_" + configured.source;
+        return configured;
+    }
+
+    aclrtContext currentContext = nullptr;
+    const auto contextRet = aclrtGetCurrentContext(&currentContext);
+    if (contextRet != ACL_SUCCESS) {
+        UC_WARN("AICPUTransProvider: current ACL context unavailable for logical_device_id={} "
+                "ret={}; device binding will use aclrtSetDevice",
+                currentDevice, static_cast<int>(contextRet));
+        currentContext = nullptr;
+    }
+    return {static_cast<std::uint32_t>(currentDevice), currentContext, "current_acl"};
+}
+
+std::pair<std::string, std::string> ResolveLocalEndpointAddress(
+    const TransportConfig& config, std::uint32_t logicalDeviceId, const std::string& fallback)
+{
+    const auto deviceKey = "aicpu_local_eid." + std::to_string(logicalDeviceId);
+    auto it = config.attrs.find(deviceKey);
+    if (it != config.attrs.end() && !it->second.empty()) {
+        return {it->second, deviceKey};
+    }
+
+    auto configured = GetConfigAttr(config, {"aicpu_local_eid", "aicpu_local_ip"});
+    if (!configured.empty()) { return {std::move(configured), "aicpu_local_eid"}; }
+    if (!fallback.empty()) { return {fallback, "localIp_argument"}; }
+
+    configured = GetConfigAttr(config, {"localIp", "local_ip"});
+    return {std::move(configured), "localIp"};
 }
 
 std::uint32_t ResolveRemoteDeviceId(const AsuEndpoint* endpoint, std::uint32_t fallback)
@@ -539,7 +605,6 @@ struct AICPUTransProvider::Impl {
 
     explicit Impl(const TransportConfig& configIn)
         : config(configIn),
-          localDeviceId(ResolveDeviceId(configIn)),
           notifyNum(ParseUint32(GetConfigAttr(configIn, {"aicpu_notify_num", "notify_num"}),
                                 kDefaultNotifyNum)),
           ubSqDepth(ParseUint32(GetConfigAttr(configIn, {"aicpu_ub_sq_depth", "ub_sq_depth"}),
@@ -571,6 +636,10 @@ struct AICPUTransProvider::Impl {
                                                              "staged_mami_tag"}),
                                     0))
     {
+        auto selection = ResolveLocalDevice(configIn);
+        localDeviceId = selection.deviceId;
+        providerContext = selection.context;
+        deviceSelectionSource = std::move(selection.source);
         if (channelName.empty()) { channelName = kDefaultChannelName; }
     }
 
@@ -628,19 +697,18 @@ struct AICPUTransProvider::Impl {
             return Status::OK();
         }
 
-        auto resolvedLocalIp = localIp;
-        if (resolvedLocalIp.empty()) {
-            resolvedLocalIp = GetConfigAttr(config, {"localIp", "local_ip", "aicpu_local_ip"});
-        }
+        auto [resolvedLocalIp, addressSource] =
+            ResolveLocalEndpointAddress(config, localDeviceId, localIp);
         if (resolvedLocalIp.empty()) {
             UC_ERROR("AICPUTransProvider: localIp is required for hcomm endpoint");
             return Status::Error(StatusCode::INVALID_ARGUMENT,
                                  "AICPUTransProvider: localIp is required for hcomm endpoint");
         }
 
-        UC_INFO("AICPUTransProvider: creating HCOMM endpoint local_addr={} local_device_id={} "
-                "protocol={}",
-                resolvedLocalIp, localDeviceId, CommProtocolName(protocol));
+        UC_INFO("AICPUTransProvider: creating HCOMM endpoint local_addr={} address_source={} "
+                "logical_device_id={} device_source={} context={} protocol={}",
+                resolvedLocalIp, addressSource, localDeviceId, deviceSelectionSource,
+                static_cast<const void*>(providerContext), CommProtocolName(protocol));
         EndpointDesc localDesc{};
         auto status = BuildEndpointDesc(config, nullptr, resolvedLocalIp, localDeviceId, protocol, localDesc);
         if (!status.ok()) {
@@ -673,6 +741,35 @@ struct AICPUTransProvider::Impl {
         }
 
         const auto deviceId = static_cast<std::int32_t>(localDeviceId);
+        if (providerContext != nullptr) {
+            aclrtContext currentContext = nullptr;
+            const auto getContextRet = aclrtGetCurrentContext(&currentContext);
+            if (getContextRet == ACL_SUCCESS && currentContext == providerContext) {
+                return Status::OK();
+            }
+
+            const auto setContextRet = aclrtSetCurrentContext(providerContext);
+            if (setContextRet != ACL_SUCCESS) {
+                return AclError(std::string("aclrtSetCurrentContext before ") + stage +
+                                    " logical_device_id=" + std::to_string(deviceId),
+                                setContextRet);
+            }
+
+            std::int32_t currentDevice = -1;
+            const auto getDeviceRet = aclrtGetDevice(&currentDevice);
+            if (getDeviceRet != ACL_SUCCESS || currentDevice != deviceId) {
+                return Status::Error(
+                    StatusCode::INTERNAL_ERROR,
+                    "AICPUTransProvider: captured ACL context resolved unexpected logical device " +
+                        std::to_string(currentDevice) + " expected " + std::to_string(deviceId));
+            }
+            UC_INFO("AICPUTransProvider: bound captured ACL context stage={} context={} "
+                    "logical_device_id={} previous_context={} aclrtGetCurrentContext_ret={}",
+                    stage, static_cast<const void*>(providerContext), deviceId,
+                    static_cast<const void*>(currentContext), static_cast<int>(getContextRet));
+            return Status::OK();
+        }
+
         thread_local std::int32_t readyDeviceId = -1;
 
         std::int32_t currentDevice = -1;
@@ -700,7 +797,7 @@ struct AICPUTransProvider::Impl {
                             setRet);
         }
 
-        UC_INFO("AICPUTransProvider: aclrtSetDevice bound device_id={} stage={} "
+        UC_INFO("AICPUTransProvider: aclrtSetDevice bound logical_device_id={} stage={} "
                 "previous_device={} aclrtGetDevice_ret={} aclInit_ret={}",
                 deviceId, stage, currentDevice, static_cast<int>(getRet),
                 static_cast<int>(initRet));
@@ -991,6 +1088,8 @@ struct AICPUTransProvider::Impl {
 
     TransportConfig config;
     std::uint32_t localDeviceId{0};
+    aclrtContext providerContext{nullptr};
+    std::string deviceSelectionSource{"default"};
     std::uint32_t notifyNum{kDefaultNotifyNum};
     std::uint32_t ubSqDepth{kDefaultUbSqDepth};
     std::uint32_t qos{0};
@@ -1040,9 +1139,12 @@ AICPUTransProviderSendHook GetAICPUTransProviderSendHook()
 AICPUTransProvider::AICPUTransProvider(const TransportConfig& config)
     : impl_(std::make_unique<Impl>(config))
 {
-    UC_INFO("AICPU_TRANSPORT_PROVIDER_SIGNATURE={} asu_id={} local_device_id={} "
-            "staged_enabled={} staged_publish_mrs={} channel_name={}",
-            kProviderSignature, impl_->config.asuId, impl_->localDeviceId,
+    UC_INFO("AICPU_TRANSPORT_PROVIDER_SIGNATURE={} pid={} asu_id={} logical_device_id={} "
+            "device_source={} provider_context={} staged_enabled={} staged_publish_mrs={} "
+            "channel_name={}",
+            kProviderSignature, static_cast<long>(::getpid()), impl_->config.asuId,
+            impl_->localDeviceId, impl_->deviceSelectionSource,
+            static_cast<const void*>(impl_->providerContext),
             impl_->stagedEnabled ? 1 : 0, impl_->stagedPublishMems ? 1 : 0,
             impl_->channelName);
 }
@@ -1079,11 +1181,14 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     const auto* endpoint = impl_->FindEndpoint(remoteIp, port);
     const auto protocol = ResolveProtocol(impl_->config, endpoint);
     const auto remoteDeviceId = ResolveRemoteDeviceId(endpoint, impl_->localDeviceId);
-    UC_INFO("AICPUTransProvider: CreateConnection start signature={} local_addr={} remote_addr={} "
-            "remote_port={} qp_num={} timeout_ms={} local_device_id={} remote_device_id={} "
-            "protocol={} endpoint_matched={}",
-            kProviderSignature, localIp, remoteIp, port, qpNum, timeout, impl_->localDeviceId,
-            remoteDeviceId, CommProtocolName(protocol), endpoint == nullptr ? 0 : 1);
+    UC_INFO("AICPUTransProvider: CreateConnection start signature={} pid={} local_addr={} "
+            "remote_addr={} remote_port={} qp_num={} timeout_ms={} logical_device_id={} "
+            "device_source={} provider_context={} remote_device_id={} protocol={} "
+            "endpoint_matched={}",
+            kProviderSignature, static_cast<long>(::getpid()), localIp, remoteIp, port, qpNum,
+            timeout, impl_->localDeviceId, impl_->deviceSelectionSource,
+            static_cast<const void*>(impl_->providerContext), remoteDeviceId,
+            CommProtocolName(protocol), endpoint == nullptr ? 0 : 1);
 
     EndpointDesc remoteDesc{};
     status = BuildEndpointDesc(impl_->config, endpoint, remoteIp, remoteDeviceId, protocol, remoteDesc);
