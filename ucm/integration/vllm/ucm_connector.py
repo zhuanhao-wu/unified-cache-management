@@ -368,6 +368,19 @@ class UCMDirectConnector(KVConnectorBase_V1):
         return UcmConnectorFactoryV1.create_connector(name, config, module_path)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        if current_platform.device_type == "npu" and self.local_rank >= 0:
+            # The ASU provider captures the current ACL context when the store is
+            # created. Constructing torch.npu.device does not make that device
+            # current, so bind the worker rank before initializing HCOMM and MRs.
+            torch.npu.set_device(self.local_rank)
+            logger.info(
+                "Bind UCM ASU store to NPU logical device before initialization: "
+                "pid=%s local_rank=%s current_device=%s",
+                os.getpid(),
+                self.local_rank,
+                torch.npu.current_device(),
+            )
+
         if has_ucm_sparse() and os.getenv("VLLM_HASH_ATTENTION") == "1":
             for layer_name, value in kv_caches.items():
                 kv_cache, k_hash = value
