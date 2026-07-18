@@ -194,6 +194,21 @@ UC::Detail::Dictionary MakeBaseConfig()
     return config;
 }
 
+TEST(UCAsuStoreTest, PreservesWorkerDeviceIdAsTransportAttribute)
+{
+    UC::AsuStore::Config config;
+    config.asuIds = {1};
+    config.asuIps = {"127.0.0.1"};
+    config.asuPort = 19001;
+    config.deviceId = 1;
+
+    const auto transportConfig = UC::AsuStore::BuildTransportConfig(config, 0);
+
+    ASSERT_EQ(transportConfig.attrs.at("device_id"), "1");
+    ASSERT_EQ(transportConfig.endpoints.size(), 1U);
+    EXPECT_EQ(transportConfig.endpoints.front().deviceId, 1);
+}
+
 UC::Detail::TaskDesc MakeTask(const UC::Detail::BlockId& block, void* addr)
 {
     UC::Detail::TaskDesc task;

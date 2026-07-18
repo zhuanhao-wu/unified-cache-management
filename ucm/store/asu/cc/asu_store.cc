@@ -174,6 +174,11 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
     transportConfig.maxInflightTasks = static_cast<std::uint32_t>(config.maxInflightTasks);
     transportConfig.maxInflightBytes = config.maxInflightBytes;
     transportConfig.providerType = config.transProviderType;
+    if (config.deviceId >= 0) {
+        // Keep the worker-local runtime device ordinal independent of endpoint metadata
+        // refreshed from the ASU view (which may contain a physical device id).
+        transportConfig.attrs["device_id"] = std::to_string(config.deviceId);
+    }
     if (!config.asuIps.empty()) {
         UC::ASU::AsuEndpoint endpoint;
         endpoint.ip = config.asuIps[index];
