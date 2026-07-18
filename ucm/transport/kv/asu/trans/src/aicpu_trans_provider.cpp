@@ -697,12 +697,18 @@ struct AICPUTransProvider::Impl {
 
         std::int32_t currentDevice = -1;
         const auto deviceRet = aclrtGetDevice(&currentDevice);
-        if (deviceRet != ACL_SUCCESS) {
-            return AclError("aclrtGetDevice before CreateConnection", deviceRet);
-        }
-        if (currentDevice < 0) {
-            return Status::Error(StatusCode::INVALID_ARGUMENT,
-                                 "AICPUTransProvider: caller ACL device is invalid");
+        if (deviceRet != ACL_SUCCESS || currentDevice < 0) {
+            std::lock_guard<std::mutex> lock(mu);
+            UC_WARN("AICPUTransProvider: caller ACL device unavailable before "
+                    "CreateConnection ret={} device_id={}; keeping logical_device_id={} "
+                    "source={} and binding it explicitly",
+                    static_cast<int>(deviceRet), currentDevice, localDeviceId,
+                    deviceSelectionSource);
+            if (endpoint == nullptr && connections.empty()) {
+                providerContext = nullptr;
+                deviceSelectionSource = "current_acl_create_connection_fallback";
+            }
+            return Status::OK();
         }
 
         aclrtContext currentContext = nullptr;
