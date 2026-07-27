@@ -29,8 +29,8 @@ TEST(FakeTransProviderTest, BindMemoryAcceptsRegisteredRegions)
 {
     FakeTransProvider provider(FakeTransProviderConfig{});
     std::vector<RegisteredMemory> regions(2);
-    regions[0].handle = reinterpret_cast<MRHandle>(std::uintptr_t{101});
-    regions[1].handle = reinterpret_cast<MRHandle>(std::uintptr_t{102});
+    regions[0].handle = static_cast<MRHandle>(std::uintptr_t{101});
+    regions[1].handle = static_cast<MRHandle>(std::uintptr_t{102});
 
     std::vector<MRHandle> handles;
     ASSERT_TRUE(provider.BindMemory(regions, handles).ok());

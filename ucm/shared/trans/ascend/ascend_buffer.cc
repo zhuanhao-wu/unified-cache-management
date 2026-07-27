@@ -193,7 +193,13 @@ Status Buffer::RegisterHostBuffer(void* host, size_t size, void** pDevice)
 #if ASCEND_SUPPORTS_REGISTER_PIN
     auto ret = aclrtHostRegisterV2(host, size, ACL_HOST_REG_MAPPED | ACL_HOST_REG_PINNED);
     if (ret != ACL_SUCCESS) [[unlikely]] { return Status{ret, std::to_string(ret)}; }
-    if (pDevice) { ret = aclrtHostGetDevicePointer(host, &device, 0); }
+    if (pDevice) {
+        ret = aclrtHostGetDevicePointer(host, &device, 0);
+        if (ret != ACL_SUCCESS) [[unlikely]] {
+            (void)aclrtHostUnregister(host);
+            return Status{ret, std::to_string(ret)};
+        }
+    }
 #else
     auto ret = aclrtHostRegister(host, size, ACL_HOST_REGISTER_MAPPED, &device);
 #endif

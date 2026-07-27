@@ -33,6 +33,7 @@ if(BUILD_UNIT_TESTS)
     include(GoogleTest)
     add_executable(kv-test-config.test
         src/kv_test_config_helpers.cpp
+        src/payload_buffer_runtime.cpp
         test/kv_test_config_helpers_test.cpp
     )
     target_include_directories(kv-test-config.test
@@ -41,6 +42,6 @@ if(BUILD_UNIT_TESTS)
             ../asu/client/include
             ../asu/trans/include
     )
-    target_link_libraries(kv-test-config.test PRIVATE gtest_main gtest)
+    target_link_libraries(kv-test-config.test PRIVATE gtest_main gtest asu_ascend_deps)
     gtest_discover_tests(kv-test-config.test)
 endif()

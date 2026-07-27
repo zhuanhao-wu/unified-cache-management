@@ -428,7 +428,7 @@ public:
         if (failRegister) {
             return Status::Error(StatusCode::INTERNAL_ERROR, "stub register failed");
         }
-        handles.push_back(reinterpret_cast<MRHandle>(static_cast<uintptr_t>(registerCount)));
+        handles.push_back(static_cast<MRHandle>(static_cast<uintptr_t>(registerCount)));
         return Status::OK();
     }
     Status BindMemory(const std::vector<RegisteredMemory>& regions,

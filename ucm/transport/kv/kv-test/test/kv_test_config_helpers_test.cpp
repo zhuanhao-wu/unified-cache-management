@@ -1,9 +1,35 @@
 #include "kv_test/kv_test_config_helpers.h"
+#include "kv_test/payload_buffer_runtime.h"
+#include <cstdlib>
 #include <gtest/gtest.h>
+#include <optional>
+#include <string>
 #include <utility>
 
 namespace UC::KVTest {
 namespace {
+
+class ScopedDeviceEnv {
+public:
+    ScopedDeviceEnv()
+    {
+        const char* value = std::getenv("UMC_ASU_DEVICE_ID");
+        if (value != nullptr) { saved_ = value; }
+        (void)unsetenv("UMC_ASU_DEVICE_ID");
+    }
+
+    ~ScopedDeviceEnv()
+    {
+        if (saved_.has_value()) {
+            (void)setenv("UMC_ASU_DEVICE_ID", saved_->c_str(), 1);
+        } else {
+            (void)unsetenv("UMC_ASU_DEVICE_ID");
+        }
+    }
+
+private:
+    std::optional<std::string> saved_;
+};
 
 TEST(KvTestConfigHelpersTest, AivProviderDoesNotEnableFakeBackend)
 {
@@ -18,6 +44,59 @@ TEST(KvTestConfigHelpersTest, AivProviderDoesNotEnableFakeBackend)
               UC::ASU::TransProviderType::AIV);
     EXPECT_TRUE(config.asuClientConfig.transportConfigs.front().attrs.empty());
     EXPECT_EQ(AllocationPolicyForConfig(config), DeviceAllocationPolicy::AIV_REGISTERABLE);
+}
+
+TEST(KvTestConfigHelpersTest, AicpuProviderUsesRegisterableDevicePayloads)
+{
+    KvTestConfig config;
+    UC::ASU::TransportConfig transportConfig;
+    transportConfig.providerType = UC::ASU::TransProviderType::AICPU;
+    config.asuClientConfig.transportConfigs.emplace_back(std::move(transportConfig));
+
+    EXPECT_FALSE(HasFakeProvider(config));
+    EXPECT_FALSE(IsAivProviderMode(config));
+    EXPECT_TRUE(IsAicpuProviderMode(config));
+    EXPECT_EQ(AllocationPolicyForConfig(config), DeviceAllocationPolicy::AIV_REGISTERABLE);
+}
+
+TEST(KvTestConfigHelpersTest, AicpuPayloadDeviceUsesExplicitLocalDevice)
+{
+    ScopedDeviceEnv deviceEnv;
+    KvTestConfig config;
+    UC::ASU::TransportConfig transportConfig;
+    transportConfig.providerType = UC::ASU::TransProviderType::AICPU;
+    transportConfig.attrs["device_id"] = "5";
+    transportConfig.endpoints.push_back(UC::ASU::AsuEndpoint{});
+    transportConfig.endpoints.back().deviceId = 6;
+    config.asuClientConfig.transportConfigs.emplace_back(std::move(transportConfig));
+
+    EXPECT_EQ(ResolvePayloadDeviceId(config), 5);
+}
+
+TEST(KvTestConfigHelpersTest, AicpuPayloadDeviceIgnoresRemoteEndpointDevice)
+{
+    ScopedDeviceEnv deviceEnv;
+    KvTestConfig config;
+    UC::ASU::TransportConfig transportConfig;
+    transportConfig.providerType = UC::ASU::TransProviderType::AICPU;
+    transportConfig.endpoints.push_back(UC::ASU::AsuEndpoint{});
+    transportConfig.endpoints.back().deviceId = 6;
+    config.asuClientConfig.transportConfigs.emplace_back(std::move(transportConfig));
+
+    EXPECT_EQ(ResolvePayloadDeviceId(config), 0);
+}
+
+TEST(KvTestConfigHelpersTest, AivPayloadDeviceKeepsEndpointFallback)
+{
+    ScopedDeviceEnv deviceEnv;
+    KvTestConfig config;
+    UC::ASU::TransportConfig transportConfig;
+    transportConfig.providerType = UC::ASU::TransProviderType::AIV;
+    transportConfig.endpoints.push_back(UC::ASU::AsuEndpoint{});
+    transportConfig.endpoints.back().deviceId = 6;
+    config.asuClientConfig.transportConfigs.emplace_back(std::move(transportConfig));
+
+    EXPECT_EQ(ResolvePayloadDeviceId(config), 6);
 }
 
 TEST(KvTestConfigHelpersTest, FakeDefaultsDoNotModifyAivTransport)

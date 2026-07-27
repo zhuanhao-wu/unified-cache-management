@@ -53,6 +53,7 @@ public:
     std::uint32_t failTokenLookupAt{0};
     std::uint32_t failUnregisterAt{0};
     bool failUnregister{false};
+    std::int32_t expectedDeviceId{-1};
     std::vector<MRHandle> unboundHandles;
     std::vector<MRHandle> unregisteredHandles;
 
@@ -89,7 +90,7 @@ public:
             if (failRegisterAt != 0 && registerCount == failRegisterAt) {
                 return Status::Error(StatusCode::INTERNAL_ERROR, "stub register failed");
             }
-            handles.push_back(reinterpret_cast<MRHandle>(static_cast<uintptr_t>(registerCount)));
+            handles.push_back(static_cast<MRHandle>(static_cast<uintptr_t>(registerCount)));
         }
         return Status::OK();
     }
@@ -102,7 +103,7 @@ public:
         for (std::size_t index = 0; index < regions.size(); ++index) {
             ++bindCount;
             handles.push_back(
-                reinterpret_cast<MRHandle>(static_cast<std::uintptr_t>(1000 + bindCount)));
+                static_cast<MRHandle>(static_cast<std::uintptr_t>(1000 + bindCount)));
         }
         return Status::OK();
     }
@@ -148,6 +149,14 @@ public:
         }
         tokenId = 1;
         return Status::OK();
+    }
+
+    Status ValidateMemoryRegion(const MemoryRegion& region) const override
+    {
+        if (expectedDeviceId < 0 || region.deviceId < 0 || region.deviceId == expectedDeviceId) {
+            return Status::OK();
+        }
+        return Status::Error(StatusCode::INVALID_ARGUMENT, "stub memory device mismatch");
     }
 };
 
@@ -259,6 +268,31 @@ TEST(AsuTransportRegisterTest, RegisterDeviceRegionDoesNotRequireConnection)
     EXPECT_EQ(providerPtr->registerCount, std::uint32_t{1});
 }
 
+TEST(AsuTransportRegisterTest, RegisterRejectsRegionFromAnotherLogicalDevice)
+{
+    auto provider = std::make_unique<StubTransProvider>();
+    auto* providerPtr = provider.get();
+    providerPtr->expectedDeviceId = 1;
+
+    AsuTransportImpl transport;
+    transport.SetTransProvider(std::move(provider));
+
+    MemoryRegion region;
+    region.memoryType = MemoryType::ASCEND_DEVICE;
+    region.addr = 0x1000;
+    region.size = 4096;
+    region.deviceId = 0;
+
+    std::vector<RegisterResult> results;
+    const auto status = transport.RegisterRegions({region}, results);
+
+    EXPECT_EQ(status.code, StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.message.find("index=0"), std::string::npos);
+    ASSERT_EQ(results.size(), std::size_t{1});
+    EXPECT_EQ(results[0].handle, kInvalidMRHandle);
+    EXPECT_EQ(providerPtr->registerCallCount, std::uint32_t{0});
+}
+
 TEST(AsuTransportRegisterTest, BoundRegionsUnbindLocalMemoryWithoutUnregisteringOwnerMemory)
 {
     auto provider = std::make_unique<StubTransProvider>();
@@ -271,7 +305,7 @@ TEST(AsuTransportRegisterTest, BoundRegionsUnbindLocalMemoryWithoutUnregistering
     region.region.memoryType = MemoryType::ASCEND_DEVICE;
     region.region.addr = 0x1000;
     region.region.size = 4096;
-    region.handle = reinterpret_cast<MRHandle>(std::uintptr_t{7});
+    region.handle = static_cast<MRHandle>(std::uintptr_t{7});
     region.tokenId = 23;
 
     std::vector<RegisterResult> results;
@@ -295,6 +329,31 @@ TEST(AsuTransportRegisterTest, BoundRegionsUnbindLocalMemoryWithoutUnregistering
     EXPECT_TRUE(providerPtr->unregisteredHandles.empty());
     EXPECT_TRUE(transport.registeredRegions_.empty());
     EXPECT_TRUE(transport.ownedRegisteredRegionHandles_.empty());
+}
+
+TEST(AsuTransportRegisterTest, BindRejectsRegionFromAnotherLogicalDevice)
+{
+    auto provider = std::make_unique<StubTransProvider>();
+    auto* providerPtr = provider.get();
+    providerPtr->expectedDeviceId = 1;
+
+    AsuTransportImpl transport;
+    transport.SetTransProvider(std::move(provider));
+
+    RegisteredMemory region;
+    region.region.memoryType = MemoryType::ASCEND_DEVICE;
+    region.region.addr = 0x1000;
+    region.region.size = 4096;
+    region.region.deviceId = 0;
+    region.handle = static_cast<MRHandle>(std::uintptr_t{7});
+
+    std::vector<RegisterResult> results;
+    const auto status = transport.BindRegisteredRegions({region}, results);
+
+    EXPECT_EQ(status.code, StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.message.find("index=0"), std::string::npos);
+    EXPECT_TRUE(results.empty());
+    EXPECT_EQ(providerPtr->bindCount, std::uint32_t{0});
 }
 
 TEST(AsuTransportRegisterTest, RegisterRegionsReturnsAllResultsAfterBatchFailure)
@@ -389,12 +448,12 @@ TEST(AsuTransportRegisterTest, RegisterRegionsRetainsHandlesWhenBatchCleanupFail
     EXPECT_TRUE(transport.registeredRegions_.empty());
     EXPECT_EQ(transport.ownedRegisteredRegionHandles_.size(), std::size_t{1});
     EXPECT_EQ(transport.ownedRegisteredRegionHandles_.count(
-                  reinterpret_cast<MRHandle>(std::uintptr_t{1})),
+                  static_cast<MRHandle>(std::uintptr_t{1})),
               std::size_t{1});
 
     providerPtr->failUnregister = false;
     const auto cleanupStatus =
-        transport.UnregisterRegions({reinterpret_cast<MRHandle>(std::uintptr_t{1})});
+        transport.UnregisterRegions({static_cast<MRHandle>(std::uintptr_t{1})});
     EXPECT_TRUE(cleanupStatus.ok()) << cleanupStatus.message;
     EXPECT_TRUE(transport.ownedRegisteredRegionHandles_.empty());
 }

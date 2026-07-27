@@ -89,6 +89,10 @@ public:
     static Status SerializeFailed() { return Status{ESERIALIZE_}; }
     static Status DeserializeFailed() { return Status{EDESERIALIZE_}; }
     static Status Unsupported() { return Status{EUNSUPPORTED_}; }
+    static Status Unsupported(std::string message)
+    {
+        return Status{EUNSUPPORTED_, std::move(message)};
+    }
     static Status NoSpace() { return Status{ENOSPACE_}; }
     static Status Timeout() { return Status{ETIMEOUT_}; }
 };

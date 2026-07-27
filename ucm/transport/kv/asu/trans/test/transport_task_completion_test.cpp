@@ -62,7 +62,7 @@ public:
     Status RegisterMemory(const std::vector<RegisterMemoryDesc>&,
                           std::vector<MRHandle>& handles) override
     {
-        handles.push_back(reinterpret_cast<MRHandle>(static_cast<uintptr_t>(1)));
+        handles.push_back(static_cast<MRHandle>(static_cast<uintptr_t>(1)));
         return Status::OK();
     }
     Status BindMemory(const std::vector<RegisteredMemory>& regions,

@@ -394,17 +394,25 @@ Status AsuClientImpl::RegisterRegionsOnce(const std::vector<MemoryRegion>& regio
         handles.reserve(results.size());
         for (const auto& result : results) { handles.emplace_back(result.handle); }
 
+        bool followersDetached = true;
         for (auto iter = boundTransports.rbegin(); iter != boundTransports.rend(); ++iter) {
             auto rollbackStatus = iter->second->UnbindRegisteredRegions(handles);
             if (!rollbackStatus.ok()) {
+                followersDetached = false;
                 UC_ERROR("Rollback bound ASU regions failed, asuId={}: {}", iter->first,
                          rollbackStatus.message);
             }
         }
-        auto rollbackStatus = firstIter->second->UnregisterRegions(handles);
-        if (!rollbackStatus.ok()) {
-            UC_ERROR("Rollback owner ASU regions failed, asuId={}: {}", snapshot->asuIds.front(),
-                     rollbackStatus.message);
+        if (followersDetached) {
+            auto rollbackStatus = firstIter->second->UnregisterRegions(handles);
+            if (!rollbackStatus.ok()) {
+                UC_ERROR("Rollback owner ASU regions failed, asuId={}: {}",
+                         snapshot->asuIds.front(), rollbackStatus.message);
+            }
+        } else {
+            UC_ERROR("Rollback kept owner ASU regions registered because a follower is still "
+                     "bound, asuId={}",
+                     snapshot->asuIds.front());
         }
         return finalStatus;
     }
@@ -835,6 +843,11 @@ Status AsuClientImpl::UnregisterRegionsOnce(const std::vector<MRHandle>& handles
                                                   std::to_string(handles.size()));
         }
     }
+
+    // Keep the canonical owner registration alive until every follower has detached.
+    // Successful follower unbinds are idempotent, so a later retry can safely walk all
+    // transports again without invalidating the owner while one follower still uses it.
+    if (!finalStatus.ok()) { return finalStatus; }
 
     if (!snapshot->asuIds.empty()) {
         const auto id = snapshot->asuIds.front();

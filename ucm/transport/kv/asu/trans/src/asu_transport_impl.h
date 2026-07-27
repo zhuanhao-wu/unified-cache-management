@@ -145,6 +145,7 @@ private:
 
     std::mutex registeredRegionsMu_;
     std::unordered_map<MRHandle, RegisteredMemory> registeredRegions_;
+    std::unordered_map<MRHandle, std::uintptr_t> registeredRegionTransportAddrs_;
     std::unordered_set<MRHandle> ownedRegisteredRegionHandles_;
 };
 

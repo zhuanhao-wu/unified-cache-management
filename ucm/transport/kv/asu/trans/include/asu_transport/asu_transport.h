@@ -54,7 +54,7 @@ struct TransportConfig {
 
     std::uint32_t queryQpNum{1};
     std::uint32_t loadQpNum{4};
-    std::uint32_t storeQpNum{2};
+    std::uint32_t storeQpNum{3};
 
     std::uint32_t maxInflightTasks{1024};
     std::uint64_t maxInflightBytes{1ULL << 30};

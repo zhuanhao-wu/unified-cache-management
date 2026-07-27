@@ -85,7 +85,7 @@ Status ConvertStatus(const AsuStatus& status)
         case AsuStatusCode::TASK_NOT_FOUND: return Status::NotFound();
         case AsuStatusCode::TIMEOUT: return Status::Timeout();
         case AsuStatusCode::BUFFER_NOT_SUPPORTED:
-        case AsuStatusCode::UNSUPPORTED: return Status::Unsupported();
+        case AsuStatusCode::UNSUPPORTED: return Status::Unsupported(message);
         case AsuStatusCode::RESOURCE_BUSY:
         case AsuStatusCode::IN_PROGRESS: return Status::Retry();
         default: return Status::Error(message);
@@ -184,6 +184,11 @@ UC::ASU::TransportConfig BuildTransportConfig(const Config& config, std::size_t 
     transportConfig.maxInflightTasks = static_cast<std::uint32_t>(config.maxInflightTasks);
     transportConfig.maxInflightBytes = config.maxInflightBytes;
     transportConfig.providerType = config.transProviderType;
+    if (config.deviceId >= 0) {
+        // Keep the worker-local runtime device ordinal independent of endpoint metadata
+        // refreshed from the ASU view, which may contain a remote physical device id.
+        transportConfig.attrs["device_id"] = std::to_string(config.deviceId);
+    }
 
     // Set for all backends including fake
     const auto kvNsIndex = config.uniqueId.find("_fawa_wa") == std::string::npos ? 0 : 1;
@@ -311,8 +316,15 @@ public:
     {
         auto config = ParseConfig(inConfig);
         NormalizeAsuShardConfig(config);
+        UC_INFO("Initializing ASU store: mode={}, provider={}, config_path={}, asu_id_count={}, "
+                "asu_ip_count={}, device_id={}.",
+                config.mode, TransProviderBackendName(config.transProviderType), config.configPath,
+                config.asuIds.size(), config.asuIps.size(), config.deviceId);
         auto status = CheckConfig(config);
-        if (status.Failure()) { return status; }
+        if (status.Failure()) {
+            UC_ERROR("ASU store config validation failed: {}.", status.ToString());
+            return status;
+        }
 
         tensorLayout_ = ParseTensorLayout(config.tensorLayout);
         config_ = std::move(config);
@@ -569,7 +581,7 @@ private:
             return Status::InvalidParam("FAWA requires exactly two kv_ns_ids");
         }
         if (config.transProviderType == UC::ASU::TransProviderType::UNSUPPORTED) {
-            return Status::Unsupported();
+            return Status::Unsupported("unsupported asu_trans_provider_backend");
         }
         if (config.transProviderType == UC::ASU::TransProviderType::FAKE &&
             !config.configPath.empty()) {

@@ -34,6 +34,21 @@ ROOT_DIR = os.path.abspath(os.path.dirname(__file__))
 PLATFORM = os.getenv("PLATFORM")
 ENABLE_SPARSE = os.getenv("ENABLE_SPARSE")
 BUILD_UCM_ASU = os.getenv("BUILD_UCM_ASU", "0") not in ("", "0", "false", "False")
+BUILD_UCM_ASU_PROVIDER_AICPU = os.getenv(
+    "BUILD_UCM_ASU_PROVIDER_AICPU", "0"
+) not in ("", "0", "false", "False")
+UCM_ASU_AICPU_USE_STAGED_CHANNEL_API = os.getenv(
+    "UCM_ASU_AICPU_USE_STAGED_CHANNEL_API", "1"
+) not in ("", "0", "false", "False")
+BUILD_UCM_ASU_PROVIDER_FAKE = os.getenv(
+    "BUILD_UCM_ASU_PROVIDER_FAKE", "1"
+) not in ("", "0", "false", "False")
+ASCEND_SUPPORTS_REGISTER_PIN = os.getenv("ASCEND_SUPPORTS_REGISTER_PIN", "0") not in (
+    "",
+    "0",
+    "false",
+    "False",
+)
 ENABLE_MINDIE = os.getenv("UCM_ENABLE_MINDIE", "0") not in ("", "0", "false", "False")
 BUILD_UCM_ASU_PROVIDER_AIV = os.getenv("BUILD_UCM_ASU_PROVIDER_AIV", "0") not in (
     "",
@@ -175,6 +190,18 @@ class CMakeBuild(build_ext):
             cmake_args += ["-DBUILD_UCM_SPARSE=ON"]
         if BUILD_UCM_ASU:
             cmake_args += ["-DBUILD_UCM_ASU=ON"]
+            cmake_args += [
+                "-DBUILD_UCM_ASU_PROVIDER_AICPU="
+                + ("ON" if BUILD_UCM_ASU_PROVIDER_AICPU else "OFF"),
+                "-DUCM_ASU_AICPU_USE_STAGED_CHANNEL_API="
+                + ("ON" if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API else "OFF"),
+                "-DBUILD_UCM_ASU_PROVIDER_FAKE="
+                + ("ON" if BUILD_UCM_ASU_PROVIDER_FAKE else "OFF"),
+                "-DBUILD_UCM_ASU_PROVIDER_AIV="
+                + ("ON" if BUILD_UCM_ASU_PROVIDER_AIV else "OFF"),
+                "-DASCEND_SUPPORTS_REGISTER_PIN="
+                + ("ON" if ASCEND_SUPPORTS_REGISTER_PIN else "OFF"),
+            ]
 
         match PLATFORM:
             case "cuda":

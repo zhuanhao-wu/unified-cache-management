@@ -67,6 +67,14 @@ public:
     virtual std::vector<Status> FreeThread(const std::vector<ThreadHandle>& threads) = 0;
 
     virtual Status GetMemTokenId(MRHandle mrHandle, uint32_t& tokenId) = 0;
+
+    virtual Status ValidateMemoryRegion(const MemoryRegion&) const { return Status::OK(); }
+
+    virtual Status GetMemTransportAddr(MRHandle, std::uintptr_t&) const
+    {
+        return Status::Error(StatusCode::UNSUPPORTED,
+                             "provider does not expose a translated memory address");
+    }
 };
 
 }  // namespace UC::ASU

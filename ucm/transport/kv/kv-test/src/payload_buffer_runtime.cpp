@@ -36,7 +36,7 @@ std::int32_t ResolveFakeBackendPayloadDeviceId(const KvTestConfig& config)
 
 std::int32_t ResolvePayloadDeviceId(const KvTestConfig& config)
 {
-    if (HasFakeProvider(config) && !IsAivProviderMode(config)) {
+    if (HasFakeProvider(config) && !IsAivProviderMode(config) && !IsAicpuProviderMode(config)) {
         return ResolveFakeBackendPayloadDeviceId(config);
     }
 
@@ -46,6 +46,22 @@ std::int32_t ResolvePayloadDeviceId(const KvTestConfig& config)
     }
 
     for (const auto& transportConfig : config.asuClientConfig.transportConfigs) {
+        if (transportConfig.providerType != UC::ASU::TransProviderType::AICPU) { continue; }
+        auto deviceIter = transportConfig.attrs.find("device_id");
+        if (deviceIter != transportConfig.attrs.end() && !deviceIter->second.empty()) {
+            return static_cast<std::int32_t>(std::stol(deviceIter->second));
+        }
+        // endpoint.deviceId describes the remote ASU and must not select the local AICPU payload
+        // device. The Provider uses the same explicit-config/environment/default-device model.
+        return kDefaultPayloadAclDeviceId;
+    }
+
+    for (const auto& transportConfig : config.asuClientConfig.transportConfigs) {
+        if (transportConfig.providerType != UC::ASU::TransProviderType::AIV) { continue; }
+        auto deviceIter = transportConfig.attrs.find("device_id");
+        if (deviceIter != transportConfig.attrs.end() && !deviceIter->second.empty()) {
+            return static_cast<std::int32_t>(std::stol(deviceIter->second));
+        }
         for (const auto& endpoint : transportConfig.endpoints) {
             if (endpoint.deviceId >= 0) { return endpoint.deviceId; }
         }
@@ -109,7 +125,7 @@ void PayloadBufferAclRuntime::TearDown()
 
 bool UsesDevicePayloadBuffers(const KvTestConfig& config)
 {
-    return HasFakeProvider(config) || IsAivProviderMode(config);
+    return HasFakeProvider(config) || IsAivProviderMode(config) || IsAicpuProviderMode(config);
 }
 
 Status MaybeSetUpPayloadAclThread(const KvTestConfig& config)

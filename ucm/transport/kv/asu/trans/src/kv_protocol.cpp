@@ -1225,7 +1225,7 @@ Status ProtocolManager::UnpackResponse(const void* data_ptr, KvOpcode opcode,
 
 Status ProtocolManager::PollResponseCid(const void* data_ptr, std::uint16_t& cid) const
 {
-    auto* data = static_cast<const std::uint32_t*>(data_ptr);
+    auto* data = static_cast<const volatile std::uint32_t*>(data_ptr);
     cid = data[3] & 0xFFFF;
     return Status::OK();
 }

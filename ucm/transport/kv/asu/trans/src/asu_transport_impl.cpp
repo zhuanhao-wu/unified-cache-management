@@ -67,6 +67,33 @@ Status CopyDeviceToHost(const ScatterGatherEntry& sge, void* host, std::size_t s
     return Status::OK();
 }
 
+Status ValidateMemoryRegions(const TransProvider& provider,
+                             const std::vector<MemoryRegion>& regions)
+{
+    for (std::size_t index = 0; index < regions.size(); ++index) {
+        auto status = provider.ValidateMemoryRegion(regions[index]);
+        if (!status.ok()) {
+            return Status::Error(status.code, "memory region device validation failed at index=" +
+                                                  std::to_string(index) + ": " + status.message);
+        }
+    }
+    return Status::OK();
+}
+
+Status ValidateBoundMemoryRegions(const TransProvider& provider,
+                                  const std::vector<RegisteredMemory>& regions)
+{
+    for (std::size_t index = 0; index < regions.size(); ++index) {
+        auto status = provider.ValidateMemoryRegion(regions[index].region);
+        if (!status.ok()) {
+            return Status::Error(
+                status.code, "bound memory region device validation failed at index=" +
+                                 std::to_string(index) + ": " + status.message);
+        }
+    }
+    return Status::OK();
+}
+
 }  // namespace
 
 AsuTransportImpl::~AsuTransportImpl() { Shutdown(); }
@@ -93,7 +120,7 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
         switch (config_.providerType) {
             case TransProviderType::AICPU:
 #ifdef UCM_ASU_ENABLE_AICPU_PROVIDER
-                transProvider_ = std::make_unique<AICPUTransProvider>();
+                transProvider_ = std::make_unique<AICPUTransProvider>(config_);
                 break;
 #else
                 return Status::Error(
@@ -159,7 +186,7 @@ Status AsuTransportImpl::Init(const TransportConfig& config)
 
     auto status = sendBufferManager_.Init("asu send buffer", MemoryType::HOST_PINNED,
                                           config_.sendBufferSlotSize, config_.sendBufferSlotNum,
-                                          transProvider_.get());
+                                          transProvider_.get(), false);
     if (!status.ok()) {
         (void)Shutdown();
         return status;
@@ -228,6 +255,7 @@ Status AsuTransportImpl::Shutdown()
             if (!status.ok() && finalStatus.ok()) { finalStatus = status; }
         }
         registeredRegions_.clear();
+        registeredRegionTransportAddrs_.clear();
         ownedRegisteredRegionHandles_.clear();
     }
     flagBufferManager_.Shutdown();
@@ -357,6 +385,12 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
     results.reserve(regions.size());
     if (regions.empty()) { return Status::OK(); }
 
+    auto status = ValidateMemoryRegions(*transProvider_, regions);
+    if (!status.ok()) {
+        results.assign(regions.size(), RegisterResult{status, kInvalidMRHandle});
+        return status;
+    }
+
     std::lock_guard<std::mutex> lock(registeredRegionsMu_);
     std::vector<TransProvider::RegisterMemoryDesc> registerDescs;
     registerDescs.reserve(regions.size());
@@ -369,7 +403,7 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
     }
 
     std::vector<MRHandle> mrHandles;
-    auto status = transProvider_->RegisterMemory(registerDescs, mrHandles);
+    status = transProvider_->RegisterMemory(registerDescs, mrHandles);
     if (!status.ok()) {
         ownedRegisteredRegionHandles_.insert(mrHandles.begin(), mrHandles.end());
         const auto cleanupStatus = UnregisterOwnedRegionHandles(mrHandles);
@@ -397,8 +431,15 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
     }
 
     std::vector<std::uint32_t> tokenIds(regions.size());
+    std::vector<std::uintptr_t> transportAddrs(regions.size());
     for (std::size_t index = 0; index < mrHandles.size(); ++index) {
         status = transProvider_->GetMemTokenId(mrHandles[index], tokenIds[index]);
+        if (status.ok()) {
+            transportAddrs[index] = static_cast<std::uintptr_t>(regions[index].addr);
+            status =
+                transProvider_->GetMemTransportAddr(mrHandles[index], transportAddrs[index]);
+            if (status.code == StatusCode::UNSUPPORTED) { status = Status::OK(); }
+        }
         if (status.ok()) { continue; }
 
         ownedRegisteredRegionHandles_.insert(mrHandles.begin(), mrHandles.end());
@@ -419,7 +460,12 @@ Status AsuTransportImpl::RegisterRegions(const std::vector<MemoryRegion>& region
         registeredMemory.handle = mrHandles[index];
         registeredMemory.tokenId = tokenIds[index];
         registeredRegions_[mrHandles[index]] = registeredMemory;
+        registeredRegionTransportAddrs_[mrHandles[index]] = transportAddrs[index];
         ownedRegisteredRegionHandles_.insert(mrHandles[index]);
+        UC_INFO("AsuTransportImpl: registered region canonical_handle={} local_handle={} "
+                "original_addr={} transport_addr={} size={} token_id={}",
+                mrHandles[index], mrHandles[index], regions[index].addr, transportAddrs[index],
+                regions[index].size, tokenIds[index]);
         results.emplace_back(RegisterResult{Status::OK(), mrHandles[index], tokenIds[index]});
     }
     return Status::OK();
@@ -430,6 +476,9 @@ Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemor
 {
     results.clear();
     results.reserve(regions.size());
+
+    auto status = ValidateBoundMemoryRegions(*transProvider_, regions);
+    if (!status.ok()) { return status; }
 
     std::lock_guard<std::mutex> lock(registeredRegionsMu_);
     const auto rollbackBoundMemory = [this](const std::vector<MRHandle>& handles) {
@@ -454,7 +503,7 @@ Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemor
     };
 
     std::vector<MRHandle> localHandles;
-    auto status = transProvider_->BindMemory(regions, localHandles);
+    status = transProvider_->BindMemory(regions, localHandles);
     if (!status.ok()) {
         rollbackBoundMemory(localHandles);
         return status;
@@ -466,8 +515,15 @@ Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemor
     }
 
     std::vector<std::uint32_t> tokenIds(regions.size());
+    std::vector<std::uintptr_t> transportAddrs(regions.size());
     for (std::size_t index = 0; index < localHandles.size(); ++index) {
         status = transProvider_->GetMemTokenId(localHandles[index], tokenIds[index]);
+        if (status.ok()) {
+            transportAddrs[index] = static_cast<std::uintptr_t>(regions[index].region.addr);
+            status =
+                transProvider_->GetMemTransportAddr(localHandles[index], transportAddrs[index]);
+            if (status.code == StatusCode::UNSUPPORTED) { status = Status::OK(); }
+        }
         if (status.ok()) { continue; }
 
         rollbackBoundMemory(localHandles);
@@ -479,6 +535,11 @@ Status AsuTransportImpl::BindRegisteredRegions(const std::vector<RegisteredMemor
         localRegion.handle = localHandles[index];
         localRegion.tokenId = tokenIds[index];
         registeredRegions_[regions[index].handle] = localRegion;
+        registeredRegionTransportAddrs_[regions[index].handle] = transportAddrs[index];
+        UC_INFO("AsuTransportImpl: bound region canonical_handle={} local_handle={} "
+                "original_addr={} transport_addr={} size={} token_id={}",
+                regions[index].handle, localHandles[index], regions[index].region.addr,
+                transportAddrs[index], regions[index].region.size, tokenIds[index]);
         results.emplace_back(
             RegisterResult{Status::OK(), regions[index].handle, regions[index].tokenId});
     }
@@ -516,6 +577,7 @@ Status AsuTransportImpl::UnbindRegionHandles(const std::vector<MRHandle>& handle
     for (std::size_t index = 0; index < canonicalHandles.size(); ++index) {
         if (index < statuses.size() && statuses[index].ok()) {
             registeredRegions_.erase(canonicalHandles[index]);
+            registeredRegionTransportAddrs_.erase(canonicalHandles[index]);
         } else if (failure.ok()) {
             failure = index < statuses.size()
                           ? statuses[index]
@@ -559,6 +621,7 @@ Status AsuTransportImpl::UnregisterOwnedRegionHandles(const std::vector<MRHandle
     for (std::size_t index = 0; index < handles.size(); ++index) {
         if (index < statuses.size() && statuses[index].ok()) {
             registeredRegions_.erase(handles[index]);
+            registeredRegionTransportAddrs_.erase(handles[index]);
             ownedRegisteredRegionHandles_.erase(handles[index]);
         } else if (failure.ok()) {
             failure = index < statuses.size()

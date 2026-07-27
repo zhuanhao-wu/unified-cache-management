@@ -70,7 +70,7 @@ public:
     Status RegisterMemory(const std::vector<RegisterMemoryDesc>&,
                           std::vector<MRHandle>& handles) override
     {
-        handles.push_back(reinterpret_cast<MRHandle>(static_cast<uintptr_t>(1)));
+        handles.push_back(static_cast<MRHandle>(static_cast<uintptr_t>(1)));
         return Status::OK();
     }
     Status BindMemory(const std::vector<RegisteredMemory>& regions,
@@ -148,6 +148,13 @@ std::uint32_t PackedBatchEntryMrKey(const std::uint32_t* sqe, std::size_t entryI
 {
     const auto base = kSqeDwordCount + entryIndex * kBatchEntryDwordCount;
     return ((sqe[base + 7] >> 24) & 0xFF) | ((sqe[base + 8] & 0xFFFFFF) << 8);
+}
+
+std::uint64_t PackedBatchEntryAddr(const std::uint32_t* sqe, std::size_t entryIndex)
+{
+    const auto base = kSqeDwordCount + entryIndex * kBatchEntryDwordCount;
+    return static_cast<std::uint64_t>(sqe[base + 5]) |
+           (static_cast<std::uint64_t>(sqe[base + 6]) << 32);
 }
 
 }  // namespace
@@ -289,6 +296,70 @@ TEST_F(SqeRequestTest, SubmitBatchStorePacksSqeIntoDeviceSendBuffer)
         deviceTransport.protocolManager_->VerifyPackedBuffer(packed.data(), packed.size()).ok());
 }
 
+TEST_F(SqeRequestTest, SubmitBatchStoreUsesMappedTransportBaseAndEntryOffset)
+{
+    constexpr std::uint64_t kOriginalBase = 0x100000;
+    constexpr std::uint64_t kTransportBase = 0x900000;
+    constexpr std::uint64_t kEntryOffset = 0x1000;
+    constexpr std::uint64_t kRegisteredSize = 0x3000;
+
+    auto entries = MakeEntries(1);
+    entries[0].buffer.region.addr = kOriginalBase + kEntryOffset;
+    entries[0].buffer.region.size = 0x1000;
+
+    RegisteredMemory memory;
+    memory.region = entries[0].buffer.region;
+    memory.region.addr = kOriginalBase;
+    memory.region.size = kRegisteredSize;
+    memory.handle = entries[0].buffer.handle;
+    memory.tokenId = 0x12345678;
+    transport_->registeredRegions_[memory.handle] = memory;
+    transport_->registeredRegionTransportAddrs_[memory.handle] = kTransportBase;
+
+    IoScheduler::ScheduledIoBatch subBatch{
+        BatchView<KVBuffer>{entries.data(), entries.size()}
+    };
+    TransportSubBatchContext subBatchContext;
+
+    const auto status = transport_->SubmitEntrySubBatchRequest(TransportOpType::BATCH_STORE,
+                                                               subBatch, subBatchContext);
+
+    ASSERT_TRUE(status.ok()) << status.message;
+    const auto* sqe = reinterpret_cast<const std::uint32_t*>(subBatchContext.sendSge.local_addr);
+    EXPECT_EQ(PackedBatchEntryAddr(sqe, 0), kTransportBase + kEntryOffset);
+    EXPECT_EQ(PackedBatchEntryMrKey(sqe, 0), memory.tokenId);
+}
+
+TEST_F(SqeRequestTest, SubmitBatchStoreRejectsEntryOutsideRegisteredRange)
+{
+    constexpr std::uint64_t kOriginalBase = 0x100000;
+
+    auto entries = MakeEntries(1);
+    entries[0].buffer.region.addr = kOriginalBase + 0x800;
+    entries[0].buffer.region.size = 0x1000;
+
+    RegisteredMemory memory;
+    memory.region = entries[0].buffer.region;
+    memory.region.addr = kOriginalBase;
+    memory.region.size = 0x1000;
+    memory.handle = entries[0].buffer.handle;
+    memory.tokenId = 0x12345678;
+    transport_->registeredRegions_[memory.handle] = memory;
+    transport_->registeredRegionTransportAddrs_[memory.handle] = 0x900000;
+
+    IoScheduler::ScheduledIoBatch subBatch{
+        BatchView<KVBuffer>{entries.data(), entries.size()}
+    };
+    TransportSubBatchContext subBatchContext;
+
+    const auto status = transport_->SubmitEntrySubBatchRequest(TransportOpType::BATCH_STORE,
+                                                               subBatch, subBatchContext);
+
+    EXPECT_EQ(status.code, StatusCode::INVALID_ARGUMENT);
+    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::COMPLETED);
+    EXPECT_NE(status.message.find("exceeds its registered region"), std::string::npos);
+}
+
 TEST_F(SqeRequestTest, SubmitBatchRetrieveUsesRetrieveOpcodeAndRequest)
 {
     auto entries = MakeEntries(2);
@@ -317,7 +388,7 @@ TEST_F(SqeRequestTest, SubmitBatchRetrieveUsesRetrieveOpcodeAndRequest)
     EXPECT_EQ(PackedBatchEntryMrKey(sqe, 1), std::uint32_t{0x76540001});
 }
 
-TEST_F(SqeRequestTest, SubmitBatchStoreUsesDefaultMrKeyForUnregisteredEntryBuffer)
+TEST_F(SqeRequestTest, SubmitBatchStoreRejectsUnregisteredEntryBuffer)
 {
     auto entries = MakeEntries(1);
     IoScheduler::ScheduledIoBatch subBatch{
@@ -328,11 +399,8 @@ TEST_F(SqeRequestTest, SubmitBatchStoreUsesDefaultMrKeyForUnregisteredEntryBuffe
     const auto status = transport_->SubmitEntrySubBatchRequest(TransportOpType::BATCH_STORE,
                                                                subBatch, subBatchContext);
 
-    EXPECT_TRUE(status.ok()) << status.message;
-    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::PENDING);
-    const auto* sqe = reinterpret_cast<const std::uint32_t*>(subBatchContext.sendSge.local_addr);
-    ASSERT_NE(sqe, nullptr);
-    EXPECT_EQ(PackedBatchEntryMrKey(sqe, 0), std::uint32_t{1});
+    EXPECT_EQ(status.code, StatusCode::BUFFER_NOT_REGISTERED);
+    EXPECT_EQ(subBatchContext.state, TransportSubBatchState::COMPLETED);
 }
 
 TEST_F(SqeRequestTest, SubmitDeleteCopiesKeysAndBuildsFlagBackedRequest)
