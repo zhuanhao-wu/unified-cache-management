@@ -158,7 +158,6 @@ struct MemoryRecord {
     bool hasToken{false};
     std::uint32_t stagedMrId{0};
     std::unordered_set<std::string> stagedPublicationKeys;
-    bool bound{false};
 };
 
 Status HcommError(const std::string& op, HcommResult ret, StatusCode code = StatusCode::INTERNAL_ERROR)
@@ -403,24 +402,16 @@ LocalDeviceSelection ResolveConfiguredDevice(const TransportConfig& config)
 
 LocalDeviceSelection ResolveLocalDevice(const TransportConfig& config)
 {
-    auto configured = ResolveConfiguredDevice(config);
-    auto mode = Normalize(GetConfigAttr(config, {"aicpu_device_selection", "device_selection"}));
-    if (mode.empty() || mode == "config" || mode == "configured") { return configured; }
-    if (mode != "current_acl" && mode != "current" && mode != "runtime") {
-        UC_WARN("AICPUTransProvider: unknown aicpu_device_selection={} using configured "
-                "logical_device_id={}",
-                mode, configured.deviceId);
-        return configured;
-    }
+    auto fallback = ResolveConfiguredDevice(config);
 
     std::int32_t currentDevice = -1;
     const auto deviceRet = aclrtGetDevice(&currentDevice);
     if (deviceRet != ACL_SUCCESS || currentDevice < 0) {
         UC_WARN("AICPUTransProvider: current ACL logical device unavailable ret={} device_id={}; "
-                "using configured logical_device_id={} source={}",
-                static_cast<int>(deviceRet), currentDevice, configured.deviceId, configured.source);
-        configured.source = "current_acl_fallback_" + configured.source;
-        return configured;
+                "using fallback logical_device_id={} source={}",
+                static_cast<int>(deviceRet), currentDevice, fallback.deviceId, fallback.source);
+        fallback.source = "current_acl_fallback_" + fallback.source;
+        return fallback;
     }
 
     aclrtContext currentContext = nullptr;
@@ -434,24 +425,17 @@ LocalDeviceSelection ResolveLocalDevice(const TransportConfig& config)
     return {static_cast<std::uint32_t>(currentDevice), currentContext, "current_acl"};
 }
 
-bool UsesCurrentAclDeviceSelection(const TransportConfig& config)
-{
-    const auto mode =
-        Normalize(GetConfigAttr(config, {"aicpu_device_selection", "device_selection"}));
-    return mode == "current_acl" || mode == "current" || mode == "runtime";
-}
-
 std::pair<std::string, std::string> ResolveLocalEndpointAddress(
     const TransportConfig& config, std::uint32_t logicalDeviceId, const std::string& fallback)
 {
-    const auto deviceKey = "aicpu_local_eid." + std::to_string(logicalDeviceId);
+    const auto deviceKey = "aicpu_local_ip." + std::to_string(logicalDeviceId);
     auto it = config.attrs.find(deviceKey);
     if (it != config.attrs.end() && !it->second.empty()) {
         return {it->second, deviceKey};
     }
 
-    auto configured = GetConfigAttr(config, {"aicpu_local_eid", "aicpu_local_ip"});
-    if (!configured.empty()) { return {std::move(configured), "aicpu_local_eid"}; }
+    auto configured = GetConfigAttr(config, {"aicpu_local_ip"});
+    if (!configured.empty()) { return {std::move(configured), "aicpu_local_ip"}; }
     if (!fallback.empty()) { return {fallback, "localIp_argument"}; }
 
     configured = GetConfigAttr(config, {"localIp", "local_ip"});
@@ -672,7 +656,6 @@ struct AICPUTransProvider::Impl {
         localDeviceId = selection.deviceId;
         providerContext = selection.context;
         deviceSelectionSource = std::move(selection.source);
-        currentAclDeviceSelection = UsesCurrentAclDeviceSelection(configIn);
         if (channelName.empty()) { channelName = kDefaultChannelName; }
     }
 
@@ -717,8 +700,6 @@ struct AICPUTransProvider::Impl {
 
     Status RefreshLocalDeviceFromCaller()
     {
-        if (!currentAclDeviceSelection) { return Status::OK(); }
-
         std::int32_t currentDevice = -1;
         const auto deviceRet = aclrtGetDevice(&currentDevice);
         if (deviceRet != ACL_SUCCESS || currentDevice < 0) {
@@ -784,9 +765,11 @@ struct AICPUTransProvider::Impl {
         auto [resolvedLocalIp, addressSource] =
             ResolveLocalEndpointAddress(config, localDeviceId, localIp);
         if (resolvedLocalIp.empty()) {
-            UC_ERROR("AICPUTransProvider: localIp is required for hcomm endpoint");
+            UC_ERROR("AICPUTransProvider: local UB IP is required for hcomm endpoint "
+                     "logical_device_id={}",
+                     localDeviceId);
             return Status::Error(StatusCode::INVALID_ARGUMENT,
-                                 "AICPUTransProvider: localIp is required for hcomm endpoint");
+                                 "AICPUTransProvider: local UB IP is required for hcomm endpoint");
         }
 
         UC_INFO("AICPUTransProvider: creating HCOMM endpoint local_addr={} address_source={} "
@@ -1255,7 +1238,6 @@ struct AICPUTransProvider::Impl {
     std::uint32_t localDeviceId{0};
     aclrtContext providerContext{nullptr};
     std::string deviceSelectionSource{"default"};
-    bool currentAclDeviceSelection{false};
     std::uint32_t notifyNum{kDefaultNotifyNum};
     std::uint32_t ubSqDepth{kDefaultUbSqDepth};
     std::uint32_t qos{0};
@@ -1319,22 +1301,20 @@ AICPUTransProvider::~AICPUTransProvider()
 {
     if (!impl_) { return; }
 
-    std::vector<MRHandle> ownedMemoryHandles;
-    std::vector<MRHandle> boundMemoryHandles;
+    std::vector<MRHandle> memoryHandles;
     std::vector<ConnectionHandle> connHandles;
     {
         std::lock_guard<std::mutex> lock(impl_->mu);
-        ownedMemoryHandles.reserve(impl_->memories.size());
-        boundMemoryHandles.reserve(impl_->memories.size());
-        for (const auto& item : impl_->memories) {
-            (item.second->bound ? boundMemoryHandles : ownedMemoryHandles).push_back(item.first);
-        }
+        memoryHandles.reserve(impl_->memories.size());
+        for (const auto& item : impl_->memories) { memoryHandles.push_back(item.first); }
         connHandles.reserve(impl_->connections.size());
         for (auto* conn : impl_->connections) { connHandles.push_back(conn); }
     }
 
-    if (!boundMemoryHandles.empty()) { (void)ReleaseMemory(boundMemoryHandles, true); }
-    if (!ownedMemoryHandles.empty()) { (void)ReleaseMemory(ownedMemoryHandles, false); }
+    // HCOMM can represent repeated/subrange registrations as aliases of an earlier handle.
+    // Release newer local handles first so aliases normally disappear before their parent.
+    std::sort(memoryHandles.begin(), memoryHandles.end());
+    if (!memoryHandles.empty()) { (void)ReleaseMemory(memoryHandles, "CleanupMemory"); }
     if (!connHandles.empty()) { (void)DeleteConnections(connHandles); }
 }
 
@@ -1726,7 +1706,7 @@ std::vector<Status> AICPUTransProvider::Send(const std::vector<SendIoBatch>& ioB
 Status AICPUTransProvider::RegisterMemory(const std::vector<RegisterMemoryDesc>& memoryDescs,
                                           std::vector<MRHandle>& mrHandles)
 {
-    return RegisterMemoryImpl(memoryDescs, false, mrHandles);
+    return RegisterMemoryImpl(memoryDescs, "RegisterMemory", mrHandles);
 }
 
 Status AICPUTransProvider::BindMemory(const std::vector<RegisteredMemory>& regions,
@@ -1747,17 +1727,20 @@ Status AICPUTransProvider::BindMemory(const std::vector<RegisteredMemory>& regio
                                static_cast<std::size_t>(registered.region.size),
                                static_cast<std::uintptr_t>(registered.region.addr)});
     }
-    return RegisterMemoryImpl(memoryDescs, true, mrHandles);
+    // Bind is a local attachment operation. The canonical handle belongs to AsuTransportImpl;
+    // this provider registers the range on its own Endpoint and returns a local MR handle.
+    // HCOMM may internally make that local registration an alias when the same Endpoint already
+    // contains the range.
+    return RegisterMemoryImpl(memoryDescs, "BindMemory", mrHandles);
 }
 
 Status AICPUTransProvider::RegisterMemoryImpl(
-    const std::vector<RegisterMemoryDesc>& memoryDescs, bool bound,
+    const std::vector<RegisterMemoryDesc>& memoryDescs, const char* operation,
     std::vector<MRHandle>& mrHandles)
 {
     mrHandles.clear();
     if (memoryDescs.empty()) { return Status::OK(); }
 
-    const char* operation = bound ? "BindMemory" : "RegisterMemory";
     AclContextScope contextScope(operation);
     std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
     auto bindStatus = impl_->EnsureAclDeviceBound(operation);
@@ -1782,7 +1765,7 @@ Status AICPUTransProvider::RegisterMemoryImpl(
     std::vector<MRHandle> createdHandles;
     createdHandles.reserve(memoryDescs.size());
     auto cleanupCreated = [&]() {
-        const auto statuses = ReleaseMemory(createdHandles, bound);
+        const auto statuses = ReleaseMemory(createdHandles, "RollbackMemory");
         std::vector<MRHandle> failedHandles;
         failedHandles.reserve(createdHandles.size());
         for (std::size_t index = 0; index < createdHandles.size(); ++index) {
@@ -1804,7 +1787,6 @@ Status AICPUTransProvider::RegisterMemoryImpl(
         }
 
         auto record = std::make_unique<MemoryRecord>();
-        record->bound = bound;
         record->endpoint = endpoint;
         record->originalAddr = desc.addr;
         record->localAddr = desc.localAddr == 0 ? desc.addr : desc.localAddr;
@@ -1922,7 +1904,7 @@ std::vector<Status> AICPUTransProvider::UnbindMemory(
     std::vector<MRHandle> handles;
     handles.reserve(memoryDescs.size());
     for (const auto& desc : memoryDescs) { handles.push_back(desc.mrHandle); }
-    return ReleaseMemory(handles, true);
+    return ReleaseMemory(handles, "UnbindMemory");
 }
 
 std::vector<Status> AICPUTransProvider::UnregisterMemory(
@@ -1931,22 +1913,24 @@ std::vector<Status> AICPUTransProvider::UnregisterMemory(
     std::vector<MRHandle> handles;
     handles.reserve(memoryDescs.size());
     for (const auto& desc : memoryDescs) { handles.push_back(desc.mrHandle); }
-    return ReleaseMemory(handles, false);
+    return ReleaseMemory(handles, "UnregisterMemory");
 }
 
 std::vector<Status> AICPUTransProvider::ReleaseMemory(const std::vector<MRHandle>& mrHandles,
-                                                      bool bound)
+                                                      const char* operation)
 {
     std::vector<Status> results(mrHandles.size(), Status::OK());
     if (mrHandles.empty()) { return results; }
 
-    const char* operation = bound ? "UnbindMemory" : "UnregisterMemory";
     AclContextScope contextScope(operation);
     std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
     const auto deviceStatus = impl_->EnsureAclDeviceBound(operation);
     if (!deviceStatus.ok()) { return std::vector<Status>(mrHandles.size(), deviceStatus); }
 
-    for (std::size_t index = 0; index < mrHandles.size(); ++index) {
+    // The caller normally preserves registration order. Reverse release keeps HCOMM aliases
+    // ahead of the original local registration while result slots still match the input.
+    for (std::size_t reverseIndex = mrHandles.size(); reverseIndex > 0; --reverseIndex) {
+        const auto index = reverseIndex - 1;
         const auto handle = mrHandles[index];
         if (handle == kInvalidMRHandle) { continue; }
 
@@ -1954,13 +1938,6 @@ std::vector<Status> AICPUTransProvider::ReleaseMemory(const std::vector<MRHandle
         auto iter = impl_->memories.find(handle);
         if (iter == impl_->memories.end()) {
             UC_DEBUG("AICPUTransProvider: {} ignored released handle={}", operation, handle);
-            continue;
-        }
-        if (iter->second->bound != bound) {
-            results[index] = Status::Error(
-                StatusCode::INVALID_ARGUMENT,
-                std::string("AICPUTransProvider::") + operation +
-                    " used with the wrong memory ownership");
             continue;
         }
         results[index] = impl_->ReleaseMemoryRecord(*iter->second);

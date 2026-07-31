@@ -52,9 +52,10 @@ public:
                                std::uintptr_t& transportAddr) const override;
 
 private:
-    Status RegisterMemoryImpl(const std::vector<RegisterMemoryDesc>& memoryDescs, bool bound,
-                              std::vector<MRHandle>& mrHandles);
-    std::vector<Status> ReleaseMemory(const std::vector<MRHandle>& mrHandles, bool bound);
+    Status RegisterMemoryImpl(const std::vector<RegisterMemoryDesc>& memoryDescs,
+                              const char* operation, std::vector<MRHandle>& mrHandles);
+    std::vector<Status> ReleaseMemory(const std::vector<MRHandle>& mrHandles,
+                                      const char* operation);
 
     struct Impl;
     std::unique_ptr<Impl> impl_;
