@@ -109,25 +109,27 @@ struct StagedPublishTarget {
     std::string oobHost;
     std::uint16_t oobPort{0};
     std::uint32_t clientId{0};
+    std::uint32_t laneToken{0};
 };
 
 bool operator<(const StagedPublishTarget& lhs, const StagedPublishTarget& rhs)
 {
     if (lhs.oobHost != rhs.oobHost) { return lhs.oobHost < rhs.oobHost; }
     if (lhs.oobPort != rhs.oobPort) { return lhs.oobPort < rhs.oobPort; }
-    return lhs.clientId < rhs.clientId;
+    if (lhs.clientId != rhs.clientId) { return lhs.clientId < rhs.clientId; }
+    return lhs.laneToken < rhs.laneToken;
 }
 
 bool operator==(const StagedPublishTarget& lhs, const StagedPublishTarget& rhs)
 {
     return lhs.oobHost == rhs.oobHost && lhs.oobPort == rhs.oobPort &&
-           lhs.clientId == rhs.clientId;
+           lhs.clientId == rhs.clientId && lhs.laneToken == rhs.laneToken;
 }
 
 std::string StagedPublishTargetKey(const StagedPublishTarget& target)
 {
     return target.oobHost + ":" + std::to_string(target.oobPort) + ":" +
-           std::to_string(target.clientId);
+           std::to_string(target.clientId) + ":" + std::to_string(target.laneToken);
 }
 
 struct ConnectionRecord {
@@ -910,7 +912,8 @@ struct AICPUTransProvider::Impl {
             for (auto* conn : connections) {
                 if (conn != nullptr) {
                     targets.push_back(
-                        {conn->stagedOobHost, conn->stagedOobPort, conn->stagedInfo.clientId});
+                        {conn->stagedOobHost, conn->stagedOobPort, conn->stagedInfo.clientId,
+                         conn->stagedInfo.controllerId});
                 }
             }
         }
@@ -922,7 +925,7 @@ struct AICPUTransProvider::Impl {
             std::remove_if(targets.begin(), targets.end(),
                            [&](const StagedPublishTarget& target) {
                                return target.oobHost.empty() || target.oobPort == 0U ||
-                                      target.clientId == 0U;
+                                      target.clientId == 0U || target.laneToken == 0U;
                            }),
             targets.end());
         if (targets.empty()) {
@@ -945,17 +948,11 @@ struct AICPUTransProvider::Impl {
         mr.mrId = record.stagedMrId;
 
         for (const auto& target : targets) {
-            std::uint32_t requestId = 0;
-            {
-                std::lock_guard<std::mutex> lock(mu);
-                do {
-                    requestId = nextStagedRequestId++;
-                } while (requestId == 0U);
-            }
             UC_INFO("AICPUTransProvider: publishing staged MR tag={} mr_id={} original_addr={} "
-                    "transport_addr={} size={} oob={}:{} client_id={} request_id={}",
+                    "transport_addr={} size={} oob={}:{} client_id={} lane_token={}",
                     record.tag, record.stagedMrId, record.originalAddr, record.transportAddr,
-                    record.size, target.oobHost, target.oobPort, target.clientId, requestId);
+                    record.size, target.oobHost, target.oobPort, target.clientId,
+                    target.laneToken);
 
             HcommStagedMrPublishDesc publish{};
             const auto initRet = HcommStagedMrPublishDescInit(&publish, 1U);
@@ -964,7 +961,7 @@ struct AICPUTransProvider::Impl {
             publish.oobPort = target.oobPort;
             publish.timeoutMs = sendTimeoutMs;
             publish.clientId = target.clientId;
-            publish.requestId = requestId;
+            publish.requestId = target.laneToken;
             publish.mrNum = 1U;
             publish.mrs = &mr;
 
@@ -998,7 +995,7 @@ struct AICPUTransProvider::Impl {
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
         const std::vector<StagedPublishTarget> targets{
             {connection.stagedOobHost, connection.stagedOobPort,
-             connection.stagedInfo.clientId}};
+             connection.stagedInfo.clientId, connection.stagedInfo.controllerId}};
         for (auto* record : records) {
             if (record == nullptr) { continue; }
             auto status = PublishMemoryStaged(*record, targets);
@@ -1248,7 +1245,6 @@ struct AICPUTransProvider::Impl {
     std::uint32_t stagedRmUasid{0};
     std::uint64_t stagedMamiTag{0};
     std::uint32_t nextStagedMrId{0};
-    std::uint32_t nextStagedRequestId{1};
 
     std::mutex mu;
     // Channel creation and MR mutation must observe one another atomically. Rollback paths call
