@@ -641,9 +641,6 @@ struct AICPUTransProvider::Impl {
           stagedPublishMems(ParseBool(GetConfigAttr(configIn, {"aicpu_staged_publish_mrs",
                                                                "staged_publish_mrs"}),
                                       true)),
-          stagedChannelUseSeg1(ParseBool(GetConfigAttr(configIn, {"aicpu_staged_channel_seg1",
-                                                                  "staged_channel_seg1"}),
-                                         false)),
           stagedKato(ParseUint32(GetConfigAttr(configIn, {"aicpu_staged_kato", "staged_kato"}), 0)),
           stagedRmUasid(ParseUint32(GetConfigAttr(configIn, {"aicpu_staged_rm_uasid",
                                                              "staged_rm_uasid"}),
@@ -970,7 +967,6 @@ struct AICPUTransProvider::Impl {
             publish.requestId = requestId;
             publish.mrNum = 1U;
             publish.mrs = &mr;
-            publish.useSeg1Handshake = 1U;
 
             const auto ret = HcommMemPublishStaged(record.endpoint, &publish);
             if (ret != 0) { return HcommConnectionError("HcommMemPublishStaged", ret); }
@@ -1248,7 +1244,6 @@ struct AICPUTransProvider::Impl {
     std::string channelName;
     std::string hixlKernelJsonPath;
     bool stagedPublishMems{true};
-    bool stagedChannelUseSeg1{false};
     std::uint32_t stagedKato{0};
     std::uint32_t stagedRmUasid{0};
     std::uint64_t stagedMamiTag{0};
@@ -1464,15 +1459,14 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
         stagedDesc.clientId = stagedClientId;
         stagedDesc.qpIndex = qpIndex;
         stagedDesc.kato = impl_->stagedKato;
-        stagedDesc.useSeg1Handshake = impl_->stagedChannelUseSeg1 ? 1U : 0U;
         stagedDesc.connMode = HCOMM_STAGED_CONN_MODE_RM;
         stagedDesc.rmUasid = impl_->stagedRmUasid;
         stagedDesc.mamiTag = impl_->stagedMamiTag;
         UC_INFO("AICPUTransProvider: HcommChannelCreateStaged begin qp_index={} "
-                "oob={}:{} client_id={} timeout_ms={} use_seg1={} rm_uasid={} "
+                "oob={}:{} client_id={} timeout_ms={} rm_uasid={} "
                 "mami_tag={} channel_port={}",
                 qpIndex, stagedOobHost, stagedOobPort, stagedClientId, stagedDesc.timeoutMs,
-                stagedDesc.useSeg1Handshake, stagedDesc.rmUasid, stagedDesc.mamiTag, desc.port);
+                stagedDesc.rmUasid, stagedDesc.mamiTag, desc.port);
         const auto chanRet =
             HcommChannelCreateStaged(hcommEndpoint, COMM_ENGINE_AICPU, &stagedDesc, 1U,
                                      &record->channel);
