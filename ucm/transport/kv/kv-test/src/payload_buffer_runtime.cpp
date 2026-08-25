@@ -107,7 +107,7 @@ void PayloadBufferAclRuntime::TearDown()
 
 bool UsesDevicePayloadBuffers(const KvTestConfig& config)
 {
-    return HasFakeProvider(config) || IsAivProviderMode(config);
+    return HasFakeProvider(config) || IsAivProviderMode(config) || IsAicpuProviderMode(config);
 }
 
 Status MaybeSetUpPayloadAclThread(const KvTestConfig& config)
