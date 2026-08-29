@@ -110,7 +110,7 @@ Protocol ParseConfigProtocol(std::string value)
 {
     std::transform(value.begin(), value.end(), value.begin(),
                    [](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
-    if (value == "UB" || value == "UBOE") { return Protocol::UB; }
+    if (value == "UB" || value == "UBOE" || value == "UBG") { return Protocol::UB; }
     if (value == "ROCE") { return Protocol::ROCE; }
     if (value == "TCP") { return Protocol::TCP; }
     return Protocol::TCP;
