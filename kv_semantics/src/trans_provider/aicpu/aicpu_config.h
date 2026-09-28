@@ -22,6 +22,11 @@
 #endif
 
 namespace kv::aicpu_config {
+enum class StagedJfcMode {
+    USER_CTL,
+    STARS_POLL,
+};
+
 const char* CommProtocolName(CommProtocol protocol);
 bool IsUbProtocol(CommProtocol protocol);
 const char* CommAddrTypeName(CommAddrType type);
@@ -32,6 +37,7 @@ std::pair<std::string, std::string> ResolveLocalEndpointAddress(const TransportC
 std::uint32_t ResolveRemoteDeviceId(const NodeEndpoint* endpoint, std::uint32_t fallback);
 Status ResolveProtocol(const TransportConfig& config, CommProtocol& protocol);
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
+Status ResolveStagedJfcMode(const TransportConfig& config, StagedJfcMode& mode);
 std::string ResolveStagedOobHost(const TransportConfig& config, const NodeEndpoint* endpoint,
                                  const std::string& remoteIp);
 std::uint16_t ResolveStagedOobPort(const TransportConfig& config, const NodeEndpoint* endpoint,

@@ -132,6 +132,22 @@ Status ResolveProtocol(const TransportConfig& config, CommProtocol& protocol)
 }
 
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
+Status ResolveStagedJfcMode(const TransportConfig& config, StagedJfcMode& mode)
+{
+    const auto value = ToLower(GetConfigAttr(config, {"aicpu_staged_jfc_mode"}));
+    if (value.empty() || value == "user_ctl") {
+        mode = StagedJfcMode::USER_CTL;
+        return Status::OK();
+    }
+    if (value == "stars_poll") {
+        mode = StagedJfcMode::STARS_POLL;
+        return Status::OK();
+    }
+    return Status::Error(StatusCode::INVALID_ARGUMENT,
+                         "AICPUTransProvider: unsupported aicpu_staged_jfc_mode '" + value +
+                             "'; supported values are user_ctl and stars_poll");
+}
+
 std::string ResolveStagedOobHost(const TransportConfig& config, const NodeEndpoint* endpoint,
                                  const std::string& remoteIp)
 {

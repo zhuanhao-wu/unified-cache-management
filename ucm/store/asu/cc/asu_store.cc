@@ -183,6 +183,7 @@ kv::TransportConfig BuildTransportConfig(const Config& config, std::size_t index
 
     if (config.transProviderType == kv::TransProviderType::AICPU) {
         transportConfig.attrs["aicpu_hcomm_protocol"] = config.aicpuHcommProtocol;
+        transportConfig.attrs["aicpu_staged_jfc_mode"] = config.aicpuStagedJfcMode;
         const std::string addressPrefix =
             config.aicpuHcommProtocol == "ubg" ? "aicpu_local_eid." : "aicpu_local_ip.";
         // Keep every logical device entry: the provider may use the caller's ACL device.
@@ -475,6 +476,10 @@ private:
             std::transform(config.aicpuHcommProtocol.begin(), config.aicpuHcommProtocol.end(),
                            config.aicpuHcommProtocol.begin(),
                            [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+            inConfig.Get("asu_aicpu_staged_jfc_mode", config.aicpuStagedJfcMode);
+            std::transform(config.aicpuStagedJfcMode.begin(), config.aicpuStagedJfcMode.end(),
+                           config.aicpuStagedJfcMode.begin(),
+                           [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
             inConfig.Get("asu_aicpu_local_addrs", config.aicpuLocalAddrs);
             if (inConfig.Contains("asu_aicpu_send_timeout_ms")) {
                 std::uint64_t timeoutMs = 0;
@@ -619,6 +624,11 @@ private:
                 (*config.aicpuSendTimeoutMs == 0 ||
                  *config.aicpuSendTimeoutMs > std::numeric_limits<std::uint32_t>::max())) {
                 return Status::InvalidParam("asu_aicpu_send_timeout_ms must be in [1, UINT32_MAX]");
+            }
+            if (config.aicpuStagedJfcMode != "user_ctl" &&
+                config.aicpuStagedJfcMode != "stars_poll") {
+                return Status::InvalidParam(
+                    "asu_aicpu_staged_jfc_mode must be user_ctl or stars_poll");
             }
         }
         if (config.transProviderType == kv::TransProviderType::FAKE && !config.configPath.empty()) {

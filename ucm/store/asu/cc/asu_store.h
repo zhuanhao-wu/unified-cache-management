@@ -39,6 +39,7 @@ struct Config {
     kv::TransProviderType transProviderType{kv::TransProviderType::AICPU};
     std::string aicpuHcommProtocol;
     std::vector<std::string> aicpuLocalAddrs;
+    std::string aicpuStagedJfcMode{"user_ctl"};
     std::optional<std::uint64_t> aicpuSendTimeoutMs;
     std::string fakeBackendPath;
     std::uint64_t fakeBackendLatencyMs{1};

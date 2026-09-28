@@ -46,9 +46,11 @@ using aicpu_config::ResolveLocalEndpointAddress;
 using aicpu_config::ResolveProtocol;
 using aicpu_config::ResolveRemoteDeviceId;
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
+using aicpu_config::ResolveStagedJfcMode;
 using aicpu_config::ResolveStagedClientId;
 using aicpu_config::ResolveStagedOobHost;
 using aicpu_config::ResolveStagedOobPort;
+using aicpu_config::StagedJfcMode;
 #endif
 using aicpu_config::FillCommAddr;
 using aicpu_config::ResolveHixlKernelJsonPath;
@@ -196,6 +198,7 @@ struct ConnectionRecord {
     ::ThreadHandle thread{0};
     bool hasImmOverride{false};
     std::uint32_t immOverride{0};
+    bool completeSenderCqe{true};
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
     HcommStagedChannelInfo stagedInfo{};
 #endif
@@ -1083,9 +1086,9 @@ struct AICPUTransProvider::Impl {
         param.status_array = workspace.DeviceStatuses();
         param.timeout_ms = sendTimeoutMs;
         param.stats = nullptr;
-        // Staged Hcomm channels use USER_CTL sender CQs. The paired HixlBatchSend
-        // consumes one sender CQE and advances CQ/SQ CI before HcommThreadJoin.
-        param.complete_sender_cqe = 1U;
+        // USER_CTL requires HIXL to consume the sender CQE before joining the
+        // HCOMM thread. STARS_POLL owns this completion path instead.
+        param.complete_sender_cqe = connection.completeSenderCqe ? 1U : 0U;
 
         aclrtArgsHandle args = nullptr;
         aclrtParamHandle paramHandle = nullptr;
@@ -1269,12 +1272,18 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     const std::string stagedOobHost = ResolveStagedOobHost(impl_->config, endpoint, remoteIp);
     const std::uint16_t stagedOobPort = ResolveStagedOobPort(impl_->config, endpoint, port);
     const std::uint32_t stagedClientId = ResolveStagedClientId(impl_->config, endpoint);
+    StagedJfcMode stagedJfcMode = StagedJfcMode::USER_CTL;
+    status = ResolveStagedJfcMode(impl_->config, stagedJfcMode);
+    if (!status.ok()) { return status; }
+    const bool completeSenderCqe = stagedJfcMode == StagedJfcMode::USER_CTL;
     KV_INFO(
         "AICPUTransProvider: CreateConnection resolved mode=staged_{} channel_api={} "
         "staged_oob={}:{} staged_client_id={} notify_num={} ub_sq_depth={} qos={} "
-        "send_with_imm={} complete_sender_cqe={}",
+        "send_with_imm={} staged_jfc_mode={} complete_sender_cqe={}",
         CommProtocolName(protocol), kChannelApiMode, stagedOobHost, stagedOobPort, stagedClientId,
-        impl_->notifyNum, impl_->ubSqDepth, impl_->qos, 1, 0);
+        impl_->notifyNum, impl_->ubSqDepth, impl_->qos, 1,
+        stagedJfcMode == StagedJfcMode::STARS_POLL ? "stars_poll" : "user_ctl",
+        completeSenderCqe ? 1 : 0);
 #else
     KV_INFO(
         "AICPUTransProvider: CreateConnection resolved mode=staged_{} channel_api={} "
@@ -1291,6 +1300,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
             qpIndex, qpNum, kChannelApiMode);
         auto recordOwner = std::make_shared<ConnectionRecord>();
         auto* record = recordOwner.get();
+        record->completeSenderCqe = completeSenderCqe;
         const std::uint32_t notify = impl_->notifyNum;
         const auto threadRet = HcommThreadAlloc(COMM_ENGINE_AICPU, 1U, &notify, &record->thread);
         if (threadRet != 0) {
@@ -1349,14 +1359,18 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
         stagedDesc.qpIndex = qpIndex;
         stagedDesc.kato = impl_->stagedKato;
         stagedDesc.connMode = HCOMM_STAGED_CONN_MODE_RM;
+        stagedDesc.jfcMode = stagedJfcMode == StagedJfcMode::STARS_POLL
+                                 ? HCOMM_STAGED_JFC_MODE_STARS_POLL
+                                 : HCOMM_STAGED_JFC_MODE_USER_CTL;
         stagedDesc.rmUasid = impl_->stagedRmUasid;
         stagedDesc.mamiTag = impl_->stagedMamiTag;
         KV_INFO(
             "AICPUTransProvider: HcommChannelCreateStaged begin qp_index={} "
             "oob={}:{} client_id={} timeout_ms={} rm_uasid={} "
-            "mami_tag={} channel_port={}",
+            "mami_tag={} jfc_mode={} channel_port={}",
             qpIndex, stagedOobHost, stagedOobPort, stagedClientId, stagedDesc.timeoutMs,
-            stagedDesc.rmUasid, stagedDesc.mamiTag, desc.port);
+            stagedDesc.rmUasid, stagedDesc.mamiTag,
+            stagedJfcMode == StagedJfcMode::STARS_POLL ? "stars_poll" : "user_ctl", desc.port);
         const auto chanRet = HcommChannelCreateStaged(hcommEndpoint, COMM_ENGINE_AICPU, &stagedDesc,
                                                       1U, &record->channel);
         if (chanRet != 0) {
