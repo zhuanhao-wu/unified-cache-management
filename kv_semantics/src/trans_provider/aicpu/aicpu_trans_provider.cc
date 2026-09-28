@@ -67,6 +67,8 @@ constexpr std::uintptr_t kHostRegisterAlignment = 4096U;
 constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
 constexpr const char* kProviderSignature = "UCM_ASU_AICPU_PROVIDER_UBC_CTP_UBG_HCOMM_HIXL_V10";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
+constexpr std::uint32_t kHixlSenderCompletionUserCtl = 1U;
+constexpr std::uint32_t kHixlSenderCompletionStarsPoll = 2U;
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
 constexpr const char* kChannelApiMode = "HcommChannelCreateStaged";
 #else
@@ -198,7 +200,7 @@ struct ConnectionRecord {
     ::ThreadHandle thread{0};
     bool hasImmOverride{false};
     std::uint32_t immOverride{0};
-    bool completeSenderCqe{true};
+    std::uint32_t senderCompletionMode{kHixlSenderCompletionUserCtl};
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
     HcommStagedChannelInfo stagedInfo{};
 #endif
@@ -1086,9 +1088,9 @@ struct AICPUTransProvider::Impl {
         param.status_array = workspace.DeviceStatuses();
         param.timeout_ms = sendTimeoutMs;
         param.stats = nullptr;
-        // USER_CTL requires HIXL to consume the sender CQE before joining the
-        // HCOMM thread. STARS_POLL owns this completion path instead.
-        param.complete_sender_cqe = connection.completeSenderCqe ? 1U : 0U;
+        // USER_CTL consumes a sender CQE. STARS_POLL advances CI only after
+        // the RTSQ doorbell task is complete; it does not poll a CQE.
+        param.complete_sender_cqe = connection.senderCompletionMode;
 
         aclrtArgsHandle args = nullptr;
         aclrtParamHandle paramHandle = nullptr;
@@ -1275,7 +1277,9 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     StagedJfcMode stagedJfcMode = StagedJfcMode::USER_CTL;
     status = ResolveStagedJfcMode(impl_->config, stagedJfcMode);
     if (!status.ok()) { return status; }
-    const bool completeSenderCqe = stagedJfcMode == StagedJfcMode::USER_CTL;
+    const std::uint32_t senderCompletionMode =
+        stagedJfcMode == StagedJfcMode::STARS_POLL ? kHixlSenderCompletionStarsPoll
+                                                    : kHixlSenderCompletionUserCtl;
     KV_INFO(
         "AICPUTransProvider: CreateConnection resolved mode=staged_{} channel_api={} "
         "staged_oob={}:{} staged_client_id={} notify_num={} ub_sq_depth={} qos={} "
@@ -1283,7 +1287,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
         CommProtocolName(protocol), kChannelApiMode, stagedOobHost, stagedOobPort, stagedClientId,
         impl_->notifyNum, impl_->ubSqDepth, impl_->qos, 1,
         stagedJfcMode == StagedJfcMode::STARS_POLL ? "stars_poll" : "user_ctl",
-        completeSenderCqe ? 1 : 0);
+        senderCompletionMode);
 #else
     KV_INFO(
         "AICPUTransProvider: CreateConnection resolved mode=staged_{} channel_api={} "
@@ -1300,7 +1304,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
             qpIndex, qpNum, kChannelApiMode);
         auto recordOwner = std::make_shared<ConnectionRecord>();
         auto* record = recordOwner.get();
-        record->completeSenderCqe = completeSenderCqe;
+        record->senderCompletionMode = senderCompletionMode;
         const std::uint32_t notify = impl_->notifyNum;
         const auto threadRet = HcommThreadAlloc(COMM_ENGINE_AICPU, 1U, &notify, &record->thread);
         if (threadRet != 0) {
