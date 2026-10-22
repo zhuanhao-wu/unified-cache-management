@@ -2357,8 +2357,9 @@ Status AICPUTransProvider::RegisterMemoryImpl(const std::vector<RegisterMemoryDe
                 return Status::Error(StatusCode::BUFFER_NOT_SUPPORTED,
                                      "AICPUTransProvider: HCOMM token range mismatch");
             }
-            if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_UB && tokenInfo.tokenValue != 0U) {
-                record->tokenId = tokenInfo.tokenValue;
+            if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_UB && tokenInfo.tokenId != 0U) {
+                // HCOMM exposes the UB token ID shifted right by 8 bits.
+                record->tokenId = tokenInfo.tokenId << 8U;
                 record->hasToken = true;
             } else if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_RDMA && tokenInfo.rkey != 0U) {
                 record->tokenId = tokenInfo.rkey;
