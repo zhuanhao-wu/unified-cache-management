@@ -59,6 +59,7 @@ using aicpu_config::ResolveLocType;
 
 constexpr std::uint32_t kDefaultNotifyNum = 1;
 constexpr std::uint32_t kDefaultUbSqDepth = 0xFFFFFFFFU;
+constexpr std::uint32_t kDefaultQoS = 0xFFFFFFFFU;
 constexpr std::uint32_t kDefaultSendTimeoutMs = 1836U * 1000U;
 constexpr std::uint32_t kAclSyncGraceMs = 5000U;
 constexpr std::uint32_t kCpuKernelMode = 0U;
@@ -646,7 +647,7 @@ struct AICPUTransProvider::Impl {
                                       kDefaultNotifyNum)),
           ubSqDepth(ParseConfigUint32(GetConfigAttr(configIn, {"aicpu_ub_sq_depth", "ub_sq_depth"}),
                                       kDefaultUbSqDepth)),
-          qos(ParseConfigUint32(GetConfigAttr(configIn, {"aicpu_qos", "qos"}), 0)),
+          qos(ParseConfigUint32(GetConfigAttr(configIn, {"aicpu_qos", "qos"}), kDefaultQoS)),
           sendTimeoutMs(ParseConfigUint32(
               GetConfigAttr(configIn, {"aicpu_send_timeout_ms", "send_timeout_ms", "timeout"}),
               kDefaultSendTimeoutMs)),
@@ -1517,7 +1518,7 @@ struct AICPUTransProvider::Impl {
     std::string deviceSelectionSource{"default"};
     std::uint32_t notifyNum{kDefaultNotifyNum};
     std::uint32_t ubSqDepth{kDefaultUbSqDepth};
-    std::uint32_t qos{0};
+    std::uint32_t qos{kDefaultQoS};
     std::uint32_t sendTimeoutMs{kDefaultSendTimeoutMs};
     std::string channelName;
     std::string hixlKernelJsonPath;
