@@ -127,11 +127,12 @@ TEST_F(TransportTaskCompletionTest, InitRejectsAsyncModeForUnsupportedProvider)
 {
     TransportConfig config;
     config.attrs["aicpu_send_mode"] = "async";
-    config.attrs["aicpu_send_max_inflight"] = "2";
+    config.maxInflightTasks = 2;
 
     const auto status = transport_->Init(config, transport_->transProvider_);
 
     EXPECT_EQ(status.code, StatusCode::UNSUPPORTED);
+    EXPECT_EQ(transport_->asyncSendMaxInflight_, 2U);
 }
 
 TEST_F(TransportTaskCompletionTest, TaskExecutorSupportsExplicitLifecycle)

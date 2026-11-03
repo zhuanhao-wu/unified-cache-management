@@ -725,17 +725,17 @@ TEST(UCAsuStoreTest, PropagatesAicpuAsyncSendConfig)
     config.Set("asu_aicpu_hcomm_protocol", std::string{"ubc_ctp"});
     config.Set("asu_aicpu_local_addrs", std::vector<std::string>{"127.0.0.2"});
     config.Set("asu_aicpu_send_mode", std::string{"ASYNC"});
-    config.SetNumber("asu_aicpu_send_max_inflight", std::uint64_t{4});
+    config.SetNumber("asu_transport_max_inflight_tasks", std::uint64_t{4});
 
     ASSERT_TRUE(store.Setup(config).Success());
     ASSERT_FALSE(state->initConfigs.empty());
 
     const auto transportConfig = UC::AsuStore::BuildTransportConfig(state->initConfigs.back(), 0);
     EXPECT_EQ(transportConfig.attrs.at("aicpu_send_mode"), "async");
-    EXPECT_EQ(transportConfig.attrs.at("aicpu_send_max_inflight"), "4");
+    EXPECT_EQ(transportConfig.maxInflightTasks, 4U);
 }
 
-TEST(UCAsuStoreTest, RejectsZeroAicpuAsyncSendWindow)
+TEST(UCAsuStoreTest, RejectsOutOfRangeAicpuTransportTaskLimit)
 {
     UC::AsuStore::AsuStore store;
     auto config = MakeBaseConfig();
@@ -745,7 +745,7 @@ TEST(UCAsuStoreTest, RejectsZeroAicpuAsyncSendWindow)
     config.Set("asu_aicpu_hcomm_protocol", std::string{"ubc_ctp"});
     config.Set("asu_aicpu_local_addrs", std::vector<std::string>{"127.0.0.2"});
     config.Set("asu_aicpu_send_mode", std::string{"async"});
-    config.SetNumber("asu_aicpu_send_max_inflight", std::uint64_t{0});
+    config.SetNumber("asu_transport_max_inflight_tasks", std::uint64_t{1} << 32U);
 
     EXPECT_TRUE(store.Setup(config).Failure());
 }

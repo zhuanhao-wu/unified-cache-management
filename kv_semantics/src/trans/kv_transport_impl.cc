@@ -27,9 +27,7 @@
 #include <chrono>
 #include <cstdint>
 #include <exception>
-#include <limits>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -42,8 +40,6 @@
 namespace kv {
 
 namespace {
-
-constexpr std::size_t kDefaultAsyncSendMaxInflight = 2;
 
 std::chrono::steady_clock::time_point TaskDeadline(std::uint64_t timeoutMs)
 {
@@ -101,32 +97,8 @@ Status AsuTransportImpl::Init(const TransportConfig& config,
                              "aicpu_send_mode must be sync or async");
     }
     asyncSendEnabled_ = sendMode == "async";
-    asyncSendMaxInflight_ = kDefaultAsyncSendMaxInflight;
-    if (const auto inflightIt = config_.attrs.find("aicpu_send_max_inflight");
-        inflightIt != config_.attrs.end()) {
-        try {
-            std::size_t parsedCharacters = 0;
-            const auto parsed = std::stoull(inflightIt->second, &parsedCharacters);
-            if (inflightIt->second.empty() || inflightIt->second.front() == '-' ||
-                parsedCharacters != inflightIt->second.size() ||
-                parsed > std::numeric_limits<std::size_t>::max()) {
-                throw std::out_of_range("aicpu_send_max_inflight");
-            }
-            asyncSendMaxInflight_ = static_cast<std::size_t>(parsed);
-        } catch (const std::exception&) {
-            return Status::Error(StatusCode::INVALID_ARGUMENT,
-                                 "aicpu_send_max_inflight must be a positive integer");
-        }
-    }
-    if (asyncSendEnabled_ && asyncSendMaxInflight_ == 0) {
-        return Status::Error(StatusCode::INVALID_ARGUMENT,
-                             "aicpu_send_max_inflight must be greater than 0");
-    }
-    if (asyncSendEnabled_) {
-        asyncSendMaxInflight_ =
-            std::min(asyncSendMaxInflight_,
-                     std::max<std::size_t>(1, config_.maxInflightTasks));
-    }
+    // Reuse the transport task limit; a zero value must still allow worker progress.
+    asyncSendMaxInflight_ = std::max<std::size_t>(1, config_.maxInflightTasks);
     if (asyncSendEnabled_ && !transProvider_->SupportsAsyncSend()) {
         return Status::Error(StatusCode::UNSUPPORTED,
                              "configured transport provider does not support AsyncSend");

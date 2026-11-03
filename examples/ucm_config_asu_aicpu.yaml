@@ -37,7 +37,7 @@ ucm_connectors:
       # async queues several transport Sends on the AICPU stream before waiting.
       # Increase gradually (2/4/8) while observing SQ depth, timeouts, and device errors.
       asu_aicpu_send_mode: "async"
-      asu_aicpu_send_max_inflight: 2
+      asu_transport_max_inflight_tasks: 1024
       asu_client_max_inflight_tasks: 1024
 
 enable_event_sync: true
