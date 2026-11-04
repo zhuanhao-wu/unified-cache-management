@@ -85,7 +85,7 @@ TEST_F(KvProtocolPackTest, StoreProtocolPackMatchesProtocol)
     ASSERT_TRUE(status.ok()) << status.message;
 
     std::vector<std::uint32_t> expected(16, 0);
-    expected[0] = (kCid << 16) | (0x3 << 14) | 0x01;
+    expected[0] = (kCid << 16) | (kFixedBits << 14) | 0x01;
     expected[1] = kKvNsId;
     expected[2] = ((kDtype & 0x7) << 13) | ((kDspec & 0x1F) << 8);
     expected[6] = kBufferAddr & 0xFFFFFFFFULL;
@@ -133,7 +133,7 @@ TEST_F(KvProtocolPackTest, RetrieveProtocolPackMatchesProtocol)
     ASSERT_TRUE(status.ok()) << status.message;
 
     std::vector<std::uint32_t> expected(16, 0);
-    expected[0] = (kCid << 16) | (0x3 << 14) | 0x02;
+    expected[0] = (kCid << 16) | (kFixedBits << 14) | 0x02;
     expected[1] = kKvNsId;
     expected[6] = kBufferAddr & 0xFFFFFFFFULL;
     expected[7] = (kBufferAddr >> 32) & 0xFFFFFFFFULL;
@@ -192,7 +192,7 @@ TEST_F(KvProtocolPackTest, BatchStoreProtocolPackMatchesProtocol)
     ASSERT_TRUE(status.ok()) << status.message;
 
     std::vector<std::uint32_t> expected(34, 0);
-    expected[0] = (kCid << 16) | (0x3 << 14) | (kRflag ? (1U << 13) : 0) | 0x45;
+    expected[0] = (kCid << 16) | (kFixedBits << 14) | (kRflag ? (1U << 13) : 0) | 0x45;
     expected[1] = kKvNsId;
     expected[2] = ((kDtype & 0x7) << 13) | ((kDspec & 0x1F) << 8);
     expected[3] = kRespBufferAddr & 0xFFFFFFFFULL;
@@ -255,7 +255,7 @@ TEST_F(KvProtocolPackTest, BatchRetrieveProtocolPackMatchesProtocol)
     ASSERT_TRUE(status.ok()) << status.message;
 
     std::vector<std::uint32_t> expected(25, 0);
-    expected[0] = (kCid << 16) | (0x3 << 14) | (1U << 13) | 0x46;
+    expected[0] = (kCid << 16) | (kFixedBits << 14) | (1U << 13) | 0x46;
     expected[1] = kKvNsId;
     expected[3] = kRespBufferAddr & 0xFFFFFFFFULL;
     expected[4] = (kRespBufferAddr >> 32) & 0xFFFFFFFFULL;
@@ -299,7 +299,7 @@ TEST_F(KvProtocolPackTest, DeleteProtocolPackMatchesProtocol)
     ASSERT_TRUE(status.ok()) << status.message;
 
     std::vector<std::uint32_t> expected(24, 0);
-    expected[0] = (kCid << 16) | (0x3 << 14) | (kRflag ? (1U << 13) : 0) | 0x08;
+    expected[0] = (kCid << 16) | (kFixedBits << 14) | (kRflag ? (1U << 13) : 0) | 0x08;
     expected[1] = kKvNsId;
     expected[3] = kRespBufferAddr & 0xFFFFFFFFULL;
     expected[4] = (kRespBufferAddr >> 32) & 0xFFFFFFFFULL;
@@ -343,7 +343,7 @@ TEST_F(KvProtocolPackTest, ExistProtocolPackMatchesProtocol)
     ASSERT_TRUE(status.ok()) << status.message;
 
     std::vector<std::uint32_t> expected(20, 0);
-    expected[0] = (kCid << 16) | (0x3 << 14) | (1U << 13) | 0x0C;
+    expected[0] = (kCid << 16) | (kFixedBits << 14) | (1U << 13) | 0x0C;
     expected[1] = kKvNsId;
     expected[3] = kRespBufferAddr & 0xFFFFFFFFULL;
     expected[4] = (kRespBufferAddr >> 32) & 0xFFFFFFFFULL;

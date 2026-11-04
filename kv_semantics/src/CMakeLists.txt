@@ -41,7 +41,8 @@ target_link_libraries(kv_transport
 
 if(BUILD_KV_CLIENT_PROVIDER_AICPU)
     target_compile_definitions(kv_transport PRIVATE ASU_DEBUG_HOTFIX=$<BOOL:${ASU_DEBUG_HOTFIX}>)
-    target_compile_definitions(kv_transport PRIVATE ENABLE_ASU=$<BOOL:${ENABLE_ASU}>)
+    # Keep protocol header constants consistent in consumers and tests.
+    target_compile_definitions(kv_transport PUBLIC ENABLE_ASU=$<BOOL:${ENABLE_ASU}>)
     message(WARNING
         "Temporary ASU integration check enabled: loaded HCOMM must export "
         "HcommDebugGetAsuBuildMode and match UCM ENABLE_ASU=${ENABLE_ASU}. "
