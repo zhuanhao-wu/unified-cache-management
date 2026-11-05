@@ -22,7 +22,6 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <dlfcn.h>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -71,47 +70,6 @@ constexpr const char* kDefaultChannelName = "ucm_asu_aicpu";
 constexpr const char* kProviderSignature =
     "UCM_ASU_AICPU_PROVIDER_UBC_CTP_UBG_HCOMM_HIXL_ASYNC_SEND_V14";
 constexpr const char* kBatchSendKernelName = "HixlBatchSend";
-
-// Temporary integration check; remove together with HcommDebugGetAsuBuildMode.
-// Resolve against the library supplying the actual memory API, not another HCOMM install.
-Status CheckHcommAsuBuildMode()
-{
-    Dl_info libraryInfo{};
-    if (::dladdr(reinterpret_cast<void*>(&HcommMemGetTokenInfo), &libraryInfo) == 0 ||
-        libraryInfo.dli_fname == nullptr) {
-        return Status::Error(StatusCode::INVALID_ARGUMENT,
-                             "Cannot locate loaded HCOMM for ENABLE_ASU validation");
-    }
-    void* library = ::dlopen(libraryInfo.dli_fname, RTLD_NOW | RTLD_LOCAL | RTLD_NOLOAD);
-    if (library == nullptr) {
-        return Status::Error(StatusCode::INVALID_ARGUMENT,
-                             "Cannot access loaded HCOMM for ENABLE_ASU validation");
-    }
-    void* symbol = ::dlsym(library, "HcommDebugGetAsuBuildMode");
-    Dl_info symbolInfo{};
-    if (symbol == nullptr || ::dladdr(symbol, &symbolInfo) == 0 ||
-        symbolInfo.dli_fbase != libraryInfo.dli_fbase) {
-        KV_ERROR("AICPUTransProvider: loaded HCOMM {} lacks HcommDebugGetAsuBuildMode; "
-                 "install matching integration build", libraryInfo.dli_fname);
-        ::dlclose(library);
-        return Status::Error(StatusCode::INVALID_ARGUMENT,
-                             "Loaded HCOMM lacks temporary ENABLE_ASU query API");
-    }
-    using QueryMode = uint32_t (*)();
-    const auto actual = reinterpret_cast<QueryMode>(symbol)();
-    constexpr uint32_t expected = ENABLE_ASU ? 1U : 0U;
-    if (actual != expected) {
-        KV_ERROR("AICPUTransProvider: ENABLE_ASU mismatch UCM={} HCOMM={} library={}",
-                 expected, actual, libraryInfo.dli_fname);
-        ::dlclose(library);
-        return Status::Error(StatusCode::INVALID_ARGUMENT,
-                             "ENABLE_ASU mismatch between UCM and loaded HCOMM");
-    }
-    KV_INFO("AICPUTransProvider: ENABLE_ASU verified UCM={} HCOMM={} library={}",
-            expected, actual, libraryInfo.dli_fname);
-    ::dlclose(library);
-    return Status::OK();
-}
 
 #if UCM_ASU_AICPU_USE_STAGED_CHANNEL_API
 // HCOMM currently accepts staged JFC mode through an environment setting.
@@ -1643,9 +1601,7 @@ Status AICPUTransProvider::CreateConnection(const std::string& localIp, const st
     if (!impl_->channelModeStatus.ok()) { return impl_->channelModeStatus; }
 
     std::lock_guard<std::recursive_mutex> resourceLock(impl_->resourceMu);
-    auto status = CheckHcommAsuBuildMode();
-    if (!status.ok()) { return status; }
-    status = impl_->RefreshLocalDeviceFromCaller();
+    auto status = impl_->RefreshLocalDeviceFromCaller();
     if (!status.ok()) { return status; }
     ScopedAclDeviceContext deviceScope("CreateConnection", impl_->localDeviceId,
                                        impl_->providerContext);
@@ -2461,7 +2417,6 @@ Status AICPUTransProvider::RegisterMemoryImpl(const std::vector<RegisterMemoryDe
                                      "AICPUTransProvider: HCOMM token range mismatch");
             }
             if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_UB) {
-#if ENABLE_ASU
                 if (tokenInfo.tokenId != 0U) {
 #if defined(ASU_DEBUG_HOTFIX) && ASU_DEBUG_HOTFIX
                     // Temporary integration behavior; remove this branch after validation.
@@ -2472,13 +2427,6 @@ Status AICPUTransProvider::RegisterMemoryImpl(const std::vector<RegisterMemoryDe
 #endif
                     record->hasToken = true;
                 }
-#else
-                // NIDS matches the SQE MR key against the published token value.
-                if (tokenInfo.tokenValue != 0U) {
-                    record->tokenId = tokenInfo.tokenValue;
-                    record->hasToken = true;
-                }
-#endif
             } else if (tokenInfo.type == HCOMM_MEM_TOKEN_TYPE_RDMA && tokenInfo.rkey != 0U) {
                 record->tokenId = tokenInfo.rkey;
                 record->hasToken = true;

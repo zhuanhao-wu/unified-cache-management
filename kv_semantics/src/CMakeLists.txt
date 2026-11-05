@@ -41,13 +41,7 @@ target_link_libraries(kv_transport
 
 if(BUILD_KV_CLIENT_PROVIDER_AICPU)
     target_compile_definitions(kv_transport PRIVATE ASU_DEBUG_HOTFIX=$<BOOL:${ASU_DEBUG_HOTFIX}>)
-    # Keep protocol header constants consistent in consumers and tests.
-    target_compile_definitions(kv_transport PUBLIC ENABLE_ASU=$<BOOL:${ENABLE_ASU}>)
-    message(WARNING
-        "Temporary ASU integration check enabled: loaded HCOMM must export "
-        "HcommDebugGetAsuBuildMode and match UCM ENABLE_ASU=${ENABLE_ASU}. "
-        "Remove this debug ABI and its runtime check after integration.")
-    if(ENABLE_ASU AND ASU_DEBUG_HOTFIX)
+    if(ASU_DEBUG_HOTFIX)
         message(WARNING
             "ASU_DEBUG_HOTFIX is ON: UB MR keys use the HCOMM token ID without shifting left by 8. "
             "This is a temporary integration hotfix and must be removed after validation. "
@@ -97,7 +91,8 @@ if(BUILD_KV_CLIENT_PROVIDER_AICPU)
     message(STATUS "ASU HCOMM lib: ${ASU_HCOMM_LIB}")
     target_include_directories(kv_transport PRIVATE ${ASU_HCOMM_INCLUDE_DIR})
     target_link_libraries(kv_transport PRIVATE ${ASU_HCOMM_LIB} ${CMAKE_DL_LIBS})
-    target_compile_definitions(kv_transport PRIVATE UCM_ASU_ENABLE_AICPU_PROVIDER=1)
+    # Keep protocol header constants consistent in consumers and tests.
+    target_compile_definitions(kv_transport PUBLIC UCM_ASU_ENABLE_AICPU_PROVIDER=1)
 endif()
 
 if(BUILD_KV_CLIENT_PROVIDER_FAKE)
