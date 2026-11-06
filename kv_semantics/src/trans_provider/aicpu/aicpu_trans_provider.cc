@@ -19,6 +19,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <cstdio>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -1156,14 +1157,20 @@ struct AICPUTransProvider::Impl {
             aclrtBinaryLoadOptions options{};
             options.options = &option;
             options.numOpt = 1U;
+            std::fprintf(stderr, "[UCM_HIXL_LOAD] stage=BINARY_BEGIN json=%s\n", hixlKernelJsonPath.c_str());
             const auto ret =
                 aclrtBinaryLoadFromFile(hixlKernelJsonPath.c_str(), &options, &hixlBin);
+            std::fprintf(stderr, "[UCM_HIXL_LOAD] stage=BINARY_RETURN ret=%d bin=%p\n",
+                         static_cast<int>(ret), static_cast<void*>(hixlBin));
             if (ret != ACL_SUCCESS) {
                 return AclError("aclrtBinaryLoadFromFile " + hixlKernelJsonPath, ret);
             }
         }
 
         const auto getRet = aclrtBinaryGetFunction(hixlBin, kBatchSendKernelName, &func);
+        std::fprintf(stderr, "[UCM_HIXL_LOAD] stage=FUNCTION_RETURN kernel=%s ret=%d bin=%p func=%p\n",
+                     kBatchSendKernelName, static_cast<int>(getRet), static_cast<void*>(hixlBin),
+                     static_cast<void*>(func));
         if (getRet != ACL_SUCCESS) {
             return AclError("aclrtBinaryGetFunction HixlBatchSend", getRet);
         }
