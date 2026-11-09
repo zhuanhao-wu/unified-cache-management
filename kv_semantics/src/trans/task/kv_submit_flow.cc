@@ -113,12 +113,15 @@ Status TransportTaskExecutor::PrepareTaskSubBatches(
 }
 
 void TransportTaskExecutor::BuildSubBatchSendBuffers(
-    std::vector<TransportSubBatchContext>& subBatchContexts,
+    std::uint64_t taskId, std::vector<TransportSubBatchContext>& subBatchContexts,
     std::vector<TransProvider::SendIoBatch>& ioBatches)
 {
     ioBatches.reserve(subBatchContexts.size());
 
     for (auto& subBatchContext : subBatchContexts) {
+        KV_DEBUG("[UCM_SEND_TRACE] task_id={} cid={} request_dev_va=0x{:x} len={}",
+                 taskId, subBatchContext.cid, subBatchContext.sendSge.device_addr,
+                 subBatchContext.sendSge.length);
         ioBatches.push_back(TransProvider::SendIoBatch{
             subBatchContext.channel->GetConnection(),
             reinterpret_cast<void*>(subBatchContext.sendSge.device_addr),

@@ -337,7 +337,7 @@ bool TransportTaskExecutor::Execute(const TransportTaskPtr& task)
     if (status.ok()) { status = AssignSubBatchConnections(subBatchContexts); }
 
     std::vector<TransProvider::SendIoBatch> ioBatches;
-    if (status.ok()) { BuildSubBatchSendBuffers(subBatchContexts, ioBatches); }
+    if (status.ok()) { BuildSubBatchSendBuffers(task->taskId, subBatchContexts, ioBatches); }
 
     if (!status.ok()) {
         KV_ERROR("Abort transport task before send task_id={} code={} message={}", task->taskId,
@@ -425,7 +425,7 @@ bool TransportTaskExecutor::ExecuteAsync(const TransportTaskPtr& task,
     if (status.ok()) { status = AssignSubBatchConnections(subBatchContexts); }
 
     std::vector<TransProvider::SendIoBatch> ioBatches;
-    if (status.ok()) { BuildSubBatchSendBuffers(subBatchContexts, ioBatches); }
+    if (status.ok()) { BuildSubBatchSendBuffers(task->taskId, subBatchContexts, ioBatches); }
     if (status.ok() && task->cancelRequested.load(std::memory_order_acquire)) {
         status = Status::Error(StatusCode::CANCELED,
                                "transport task canceled before asynchronous send");
