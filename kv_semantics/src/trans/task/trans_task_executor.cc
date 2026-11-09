@@ -556,6 +556,17 @@ bool TransportTaskExecutor::Poll(const TransportTaskPtr& task)
             for (auto& subBatchContext : *task->subBatchContexts) {
                 if (subBatchContext.state == TransportSubBatchState::COMPLETED) { continue; }
 
+                const auto& flag = subBatchContext.flagBuffer;
+                if (flag.local_addr != 0 && flag.length >= 4 * sizeof(std::uint32_t)) {
+                    const auto* header = reinterpret_cast<const std::uint32_t*>(flag.local_addr);
+                    const auto cidWord = __atomic_load_n(header + 3, __ATOMIC_ACQUIRE);
+                    KV_ERROR("UCM_CQE_TIMEOUT task_id={} expected_cid={} observed_cid={} "
+                             "host_va=0x{:x} device_va=0x{:x} header=[{:08x},{:08x},{:08x},{:08x}]",
+                             task->taskId, subBatchContext.cid, cidWord & 0xFFFFU, flag.local_addr,
+                             flag.device_addr, __atomic_load_n(header, __ATOMIC_RELAXED),
+                             __atomic_load_n(header + 1, __ATOMIC_RELAXED),
+                             __atomic_load_n(header + 2, __ATOMIC_RELAXED), cidWord);
+                }
                 std::fill(subBatchContext.entryStatus.begin(), subBatchContext.entryStatus.end(),
                           timeoutStatus);
                 connManager_->ReportFailure(subBatchContext.channel);
